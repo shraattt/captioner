@@ -1,0 +1,50 @@
+# Phase 1 batch + Phase 3 live dependencies (Python 3.11+; developed on 3.13)
+#
+# GPU notes:
+#  - Install torch first, from the CUDA 12.8 index (cu121 has no Python 3.13 wheels),
+#    BEFORE the rest of this file:
+#      pip install torch --index-url https://download.pytorch.org/whl/cu128
+#  - faster-whisper pulls in ctranslate2 + nvidia-cudnn wheels via pip automatically.
+#  - First run downloads model weights into the HF cache (~1.5GB for medium).
+#
+# Phase 2 diarization (optional feature, safe to leave installed):
+# pyannote.audio 4.x pulls torchcodec, whose Windows DLLs fail to load;
+# Captioner reads audio for diarization through ffmpeg instead, so after
+# installing pyannote.audio run:  pip uninstall torchcodec
+pyannote.audio==4.0.7
+
+# PyAV pin: faster-whisper 1.2.1 calls av.open(..., metadata_errors="ignore"),
+# an argument PyAV removed in 19.0.0. With av>=19 the import still succeeds and
+# only a real transcription fails, at decode time, with a TypeError. Keep av
+# below 19 until faster-whisper adapts; tests/test_compat.py guards this pin.
+
+# Windows GPU runtime: the ctranslate2 wheel bundles cuDNN but not cuBLAS, and
+# a machine with only the NVIDIA driver (no CUDA Toolkit) cannot load
+# cublas64_12.dll — every job fails at encode time. This wheel supplies it.
+# transcribe.py preloads the DLLs from site-packages/nvidia/cublas/bin.
+nvidia-cublas-cu12>=12; sys_platform == "win32"
+
+faster-whisper>=1.0.0
+av<19
+pyside6>=6.6
+SoundCard>=0.4 ; sys_platform == "win"  # live capture (mic + loopback), Phase 3
+psutil>=5.9                            # benchmark resource monitoring
+pytest>=8.0
+
+# Phase 2 word alignment (align.py) + Phase 2 translation (translate.py) +
+# Phase 4 fine-tuning (scripts/ft_*.py) all go through transformers:
+#   - alignment: facebook/wav2vec2-base-960h (~380 MB, first use)
+#   - translation: facebook/m2m100_418M (~1.8 GB, first use)
+#   - fine-tuning: openai/whisper-base.en + Seq2SeqTrainer (needs accelerate)
+# torchcodec is deliberately absent: datasets only wants it for its own audio
+# decoding, and the scripts decode FLAC/audio through soundfile instead (the
+# torchcodec Windows DLLs do not load — see the pyannote note above).
+transformers>=4.44
+accelerate>=1.1.0
+datasets>=3.0
+soundfile>=0.12
+librosa>=0.10
+jiwer>=3.0
+
+# Phase 4 data augmentation (scripts/ft_build_dataset.py)
+audiomentations>=0.41

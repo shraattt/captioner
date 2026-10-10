@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+*.spec
+
+# Local data — never commit media or databases
+data/
+*.db
+*.sqlite3
+
+# Ad-hoc artifacts from your own test runs (transcripts, reference text)
+/live_transcript.srt
+/my_reference.txt
+
+# Secrets — HF token for gated pyannote models lives here
+.env
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log
+
+# OS junk
+Thumbs.db
+.DS_Store
