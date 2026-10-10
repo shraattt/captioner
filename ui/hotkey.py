@@ -20,7 +20,6 @@ import ctypes
 import ctypes.wintypes
 import logging
 import threading
-from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 
@@ -69,16 +68,16 @@ class GlobalHotkey(QObject):
         super().__init__()  # QObject init: signals need a valid C++ object
         self._modifiers = modifiers
         self._vk = vk
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
         self._thread_id = None
         self._hwnd = None
         self._registered = threading.Event()
         self._failed = threading.Event()
-        self._failure: Optional[str] = None
-        self.error: Optional[str] = None
+        self._failure: str | None = None
+        self.error: str | None = None
         self._stop_called = threading.Event()
 
-    # -- public API ----------------------------------------------------------
+    # -- public API
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
             return
@@ -109,14 +108,14 @@ class GlobalHotkey(QObject):
         self._hwnd = None
         self._thread_id = None
 
-    # -- thread body ----------------------------------------------------------
+    # -- thread body
     def _run(self) -> None:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
 
         # Explicit prototypes: without them ctypes passes ints as 32-bit
         # values, and HWND_MESSAGE (-3) zero-extends into an invalid 64-bit
-        # handle — the window creation then fails on every call.
+        # handle - the window creation then fails on every call.
         user32.CreateWindowExW.restype = ctypes.wintypes.HWND
         user32.CreateWindowExW.argtypes = [
             ctypes.wintypes.DWORD,   # dwExStyle

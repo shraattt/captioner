@@ -6,7 +6,8 @@ import json
 
 import pytest
 
-from captioner import srt, translate as T
+from captioner import srt
+from captioner import translate as T
 from captioner.segmenter import Block, Word
 
 
@@ -142,7 +143,7 @@ def test_translate_subtitles_requires_existing_captions(tmp_path):
                               translator=FakeTranslator(cache_path=tmp_path / "c.json"))
 
 
-# --- the parser that makes re-translation possible -----------------------
+#the parser that makes re-translation possible
 def test_parse_srt_round_trips():
     original = srt.to_srt(blocks())
     parsed = srt.parse_srt(original)

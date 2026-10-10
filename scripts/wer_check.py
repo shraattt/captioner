@@ -14,7 +14,6 @@ Reference file formats accepted:
     python scripts/wer_check.py clip.wav ref.txt --live
 """
 import argparse
-import os
 import re
 import sys
 from pathlib import Path
@@ -95,16 +94,17 @@ def main() -> int:
     ref = normalize(load_reference(ref_path))
     print(f"reference: {len(ref)} words from {ref_path.name}")
 
-    from captioner import config, live as L, models, transcribe
+    from captioner import config, models, transcribe
+    from captioner import live as L
 
-    # ---- batch ---------------------------------------------------------
+    #batch
     words = transcribe.transcribe_words(str(audio), args.model)
     hyp = normalize(" ".join(w.text for w in words))
     score, sub, dele, ins = wer(ref, hyp)
     print(f"batch ({args.model or config.BATCH_MODEL_SIZE}): "
           f"WER {score*100:.1f}%  ({sub} sub, {dele} del, {ins} ins / {len(ref)} ref words)")
 
-    # ---- live ----------------------------------------------------------
+    #live
     if args.live:
         try:
             live_model = models.resolve(args.live_model or config.LIVE_MODEL_SIZE)

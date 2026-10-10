@@ -12,8 +12,8 @@ import logging
 import os
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, List, Optional
 
 from faster_whisper import WhisperModel
 
@@ -60,8 +60,8 @@ def model_ref(model_size: str) -> str:
         return model_size
     return repo_id(model_size)
 
-# ``on_stage(stage, fraction)`` — fraction is None when it is not knowable.
-StageCallback = Callable[[str, Optional[float]], None]
+# ``on_stage(stage, fraction)`` - fraction is None when it is not knowable.
+StageCallback = Callable[[str, float | None], None]
 
 
 class TranscriptionCancelled(RuntimeError):
@@ -123,7 +123,7 @@ def resolve_compute_type(device: str) -> str:
     return "float16" if device == "cuda" else "int8"
 
 
-def _model_cache_dir(model_size: str) -> Optional[Path]:
+def _model_cache_dir(model_size: str) -> Path | None:
     """Where huggingface_hub would keep this model, or None if unknown."""
     try:
         from huggingface_hub.constants import HF_HUB_CACHE
@@ -164,7 +164,7 @@ def _cached_bytes(model_size: str) -> int:
     return total
 
 
-def _repo_bytes(model_size: str) -> Optional[int]:
+def _repo_bytes(model_size: str) -> int | None:
     """Total size of the model repo, for a percentage; None if unknown."""
     try:
         from huggingface_hub import HfApi
@@ -180,7 +180,7 @@ def _repo_bytes(model_size: str) -> Optional[int]:
     return total or None
 
 
-def ensure_model_downloaded(model_size: str, on_stage: Optional[StageCallback] = None) -> None:
+def ensure_model_downloaded(model_size: str, on_stage: StageCallback | None = None) -> None:
     """Fetch weights ahead of loading them, reporting how much has arrived.
 
     faster-whisper downloads lazily *inside* WhisperModel(), which leaves the
@@ -248,10 +248,10 @@ def get_model(model_size: str, device: str, compute_type: str) -> WhisperModel:
 def transcribe_words(
     audio_path: str,
     model_size: str = None,
-    on_progress: Optional[Callable[[float], None]] = None,
-    on_stage: Optional[StageCallback] = None,
-    should_cancel: Optional[Callable[[], bool]] = None,
-) -> List[Word]:
+    on_progress: Callable[[float], None] | None = None,
+    on_stage: StageCallback | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> list[Word]:
     """Transcribe an audio/video file into timed words.
 
     Accepts anything ffmpeg can open (mp4, mkv, mov, mp3, wav, m4a...);
@@ -292,8 +292,8 @@ def transcribe_words(
         condition_on_previous_text=False,
     )
 
-    words: List[Word] = []
-    for seg in segments:  # generator — transcription runs lazily here
+    words: list[Word] = []
+    for seg in segments:  # generator - transcription runs lazily here
         _check_cancel(should_cancel)  # checked per segment: prompt on long files
         for w in seg.words:
             text = w.word.strip()
@@ -305,6 +305,6 @@ def transcribe_words(
     return words
 
 
-def _check_cancel(should_cancel: Optional[Callable[[], bool]]) -> None:
+def _check_cancel(should_cancel: Callable[[], bool] | None) -> None:
     if should_cancel is not None and should_cancel():
         raise TranscriptionCancelled("canceled by the user")

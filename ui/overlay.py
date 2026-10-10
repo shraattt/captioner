@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QGuiApplication
@@ -33,13 +33,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from captioner import config
 from captioner.live import (
     IDLE_STRIDE_SECONDS,
-    MicCapture,
+    STRIDE_SECONDS,
     LiveEngine,
     LiveState,
-    STRIDE_SECONDS,
+    MicCapture,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +50,7 @@ def _overlay_qss(font_px: int = 15) -> str:
                border: 1px solid #1db954; }}
 #OverlayCommitted {{ color: #7fbf95; font-size: {font_px}px; }}
 #OverlayPartial  {{ color: #ffffff; font-size: {font_px}px; font-weight: 600; }}
+#OverlayTranslation {{ color: #a5b4fc; font-size: {max(11, font_px - 1)}px; }}
 #OverlayIdle     {{ color: #6f7378; font-size: {max(11, font_px - 1)}px; }}
 #OverlayHeader   {{ color: #9aa0a6; font-size: {max(9, font_px - 4)}px; }}
 """
@@ -77,13 +77,15 @@ class LiveWorker(QThread):
     state_ready = Signal(object)   # LiveState
     live_error = Signal(str)
 
-    def __init__(self, device_id: str, engine: Optional[LiveEngine] = None,
-                 capture_factory: Optional[Callable[[str], MicCapture]] = None,
-                 model_size: Optional[str] = None, parent=None):
+    def __init__(self, device_id: str, engine: LiveEngine | None = None,
+                 capture_factory: Callable[[str], MicCapture] | None = None,
+                 model_size: str | None = None,
+                 translate_to: str | None = None, parent=None):
         super().__init__(parent)
         self.device_id = device_id
         self._engine = engine
         self._model_size = model_size
+        self._translate_to = translate_to
         self._capture_factory = capture_factory
         self._stop = threading.Event()
 
@@ -93,7 +95,13 @@ class LiveWorker(QThread):
     def run(self) -> None:
         stop = self._stop
         try:
-            engine = self._engine or LiveEngine(model_size=self._model_size)
+            engine = self._engine or LiveEngine(
+                model_size=self._model_size,
+                translate_to=self._translate_to,
+                # A dead translation backend must not take the captions down
+                # with it: the overlay shows the note and keeps transcribing.
+                on_translation_error=self.live_error.emit,
+            )
             capture = (
                 self._capture_factory(self.device_id)
                 if self._capture_factory
@@ -124,6 +132,8 @@ class LiveWorker(QThread):
         finally:
             if hasattr(capture, "stop"):
                 capture.stop()
+            if hasattr(engine, "close"):
+                engine.close()  # stop the translation thread with the session
 
 
 class TranscriptWindow(QWidget):
@@ -156,10 +166,22 @@ class TranscriptWindow(QWidget):
         self._rendered_text = ""
 
     def update_state(self, state: LiveState) -> None:
-        """Mirror the session text; scroll only when already at the bottom."""
-        text = state.full_text
-        if state.partial:
-            text = f"{text} {state.partial}".strip()
+        """Mirror the session text; scroll only when already at the bottom.
+
+        With live translation on, each finished sentence is shown as its
+        source line followed by its translation, so the window reads as a
+        bilingual transcript rather than two disconnected texts.
+        """
+        pairs = list(getattr(state, "translated_pairs", []) or [])
+        if pairs:
+            lines = [f"{source}\n    {translated}" for source, translated in pairs]
+            text = "\n".join(lines)
+            if state.partial:
+                text = f"{text}\n{state.partial}"
+        else:
+            text = state.full_text
+            if state.partial:
+                text = f"{text} {state.partial}".strip()
         if text == self._rendered_text:
             return
         self._rendered_text = text
@@ -231,17 +253,25 @@ class LiveOverlay(QWidget):
         self.lbl_partial.setObjectName("OverlayPartial")
         self.lbl_partial.setWordWrap(True)
         self.lbl_partial.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        # The translated line, shown only while live translation is on and a
+        # sentence has come back from the translator.
+        self.lbl_translation = QLabel("")
+        self.lbl_translation.setObjectName("OverlayTranslation")
+        self.lbl_translation.setWordWrap(True)
+        self.lbl_translation.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.lbl_translation.setVisible(False)
         col.addWidget(self.lbl_committed)
         col.addWidget(self.lbl_partial)
+        col.addWidget(self.lbl_translation)
         self.show_idle()
 
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_menu)
         self.resize(self._appearance["width"], 110)
         self._restore_position()
-        self.transcript_window: Optional[TranscriptWindow] = None
+        self.transcript_window: TranscriptWindow | None = None
 
-    # -- appearance (user customization) --------------------------------------
+    # -- appearance (user customization)
     def _load_appearance(self) -> None:
         if self._settings is None:
             return
@@ -331,7 +361,7 @@ class LiveOverlay(QWidget):
             _live_preview()
             self.save_appearance()
 
-    # -- rendering -----------------------------------------------------------
+    # -- rendering
     def set_device_name(self, name: str) -> None:
         self.lbl_device.setText(name)
 
@@ -347,6 +377,8 @@ class LiveOverlay(QWidget):
         self._repolish_partial()
         self.lbl_partial.setText("live captions — listening…")
         self.lbl_level.setText("")
+        self.lbl_translation.clear()
+        self.lbl_translation.setVisible(False)
 
     def update_state(self, state: LiveState) -> None:
         self.lbl_committed.setText(state.committed)
@@ -354,6 +386,9 @@ class LiveOverlay(QWidget):
         self._repolish_partial()
         self.lbl_partial.setText(state.partial or ("…" if state.committed else "listening…"))
         self.lbl_level.setText(self._render_level(state.level))
+        translation = getattr(state, "translation", "")
+        self.lbl_translation.setText(translation)
+        self.lbl_translation.setVisible(bool(translation))
         if state.full_text:
             self._last_full_text = state.full_text
         if state.full_words:
@@ -366,7 +401,7 @@ class LiveOverlay(QWidget):
         self._repolish_partial()
         self.lbl_partial.setText(f"⚠ {message}")
 
-    # -- right-click menu ------------------------------------------------------
+    # -- right-click menu
     def _show_menu(self, pos) -> None:
         menu = QMenu(self)
         transcript = (self._last_full_text or self.lbl_committed.text()).strip()
@@ -427,7 +462,7 @@ class LiveOverlay(QWidget):
         style.unpolish(self.lbl_partial)
         style.polish(self.lbl_partial)
 
-    # -- dragging ------------------------------------------------------------
+    # -- dragging
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton and not self._appearance["lock"]:
             self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -440,7 +475,7 @@ class LiveOverlay(QWidget):
         self._drag_offset = None
         self._save_position()
 
-    # -- position persistence --------------------------------------------------
+    # -- position persistence
     def _restore_position(self) -> None:
         if self._settings is None:
             return

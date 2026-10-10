@@ -17,20 +17,21 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Optional
 
-from PySide6.QtCore import QObject, Qt, Signal, Slot
+from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtMultimedia import (
     QAudioOutput,
     QMediaFormat,
     QMediaPlayer,
+)
+from PySide6.QtMultimedia import (
     QMediaPlayer as QP,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _error_name(code: "QP.Error") -> str:
+def _error_name(code: QP.Error) -> str:
     """Human-readable name for a QMediaPlayer.Error.
 
     PySide6 does not expose these enums as ints, so ``int(code)`` raises
@@ -77,17 +78,17 @@ class Player(QObject):
     player_error = Signal(str)
     playback_state_changed = Signal(str)  # "stopped" / "playing" / "paused"
 
-    def __init__(self, parent: Optional[QObject] = None) -> None:
+    def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self._player: Optional[QMediaPlayer] = None
-        self._audio: Optional[QAudioOutput] = None
-        self._fmt: Optional[QMediaFormat] = None
+        self._player: QMediaPlayer | None = None
+        self._audio: QAudioOutput | None = None
+        self._fmt: QMediaFormat | None = None
         self._position_ms: int = 0
         self._duration_ms: int = 0
         self._last_pos_update: float = 0.0
         self._position_timer_active = False
 
-    # ---- lifecycle ----------------------------------------------------------
+    #lifecycle
 
     def _ensure(self) -> None:
         if self._player is not None:
@@ -107,7 +108,7 @@ class Player(QObject):
         self._position_ms = 0
         self._duration_ms = 0
 
-    # ---- public API ---------------------------------------------------------
+    #public API
 
     @staticmethod
     def can_decode(path: str) -> bool:
@@ -199,7 +200,7 @@ class Player(QObject):
         self._player.setPosition(ms)
         self._position_ms = ms
 
-    # ---- volume / mute -----------------------------------------------------
+    #volume / mute
 
     @property
     def volume(self) -> int:
@@ -223,7 +224,7 @@ class Player(QObject):
         if self._audio is not None:
             self._audio.setMuted(on)
 
-    # ---- querying ----------------------------------------------------------
+    #querying
 
     @property
     def position_ms(self) -> int:
@@ -251,9 +252,9 @@ class Player(QObject):
             return True
         return self._player.playbackState() == QP.PlaybackState.StoppedState
 
-    # ---- blocking helper for tests ----------------------------------------
+    #blocking helper for tests
 
-    def wait_until_done(self, timeout: float = 30.0) -> Optional[str]:
+    def wait_until_done(self, timeout: float = 30.0) -> str | None:
         """Block until playback finishes, stops, or an error occurs.
 
         Returns ``"finished"``, ``"stopped"``, or an error string, or ``None``
@@ -274,7 +275,7 @@ class Player(QObject):
             time.sleep(0.05)
         return None
 
-    # ---- Qt slots / signal handlers ----------------------------------------
+    #Qt slots / signal handlers
 
     @Slot(int)
     def _on_position(self, ms: int) -> None:
@@ -316,7 +317,7 @@ class Player(QObject):
         self.playback_state_changed.emit(name)
 
     @Slot(bool)
-    def _on_has_audio(self, has_audio: bool) -> None:  # noqa: F841 — hook registered in _ensure
+    def _on_has_audio(self, has_audio: bool) -> None:  # noqa: F841 - hook registered in _ensure
         pass
 
     @Slot(float)

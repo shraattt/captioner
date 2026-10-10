@@ -189,7 +189,7 @@ def main() -> None:
     FT_DIR.mkdir(parents=True, exist_ok=True)
 
     # The dataset is public, but an authenticated request gets a much higher
-    # rate limit — reuse the project .env token (same one diarization needs).
+    # rate limit - reuse the project .env token (same one diarization needs).
     token = config.hf_token()
     if token:
         os.environ.setdefault("HF_TOKEN", token)

@@ -51,7 +51,7 @@ def build_bench_audio(hours: float):
                 if abs(w.getnframes() / w.getframerate() - want) < 1.0 and w.getframerate() == rate:
                     return BENCH_WAV, want
         except Exception:
-            pass  # unreadable leftover — rebuild it
+            pass  # unreadable leftover - rebuild it
 
     tmp = BENCH_WAV.with_suffix(".tmp.wav")
     with wave.open(str(tmp), "wb") as out:

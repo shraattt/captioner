@@ -23,9 +23,9 @@ import logging
 import os
 import re
 import tempfile
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
 
 from .segmenter import Block, Word
 
@@ -47,9 +47,9 @@ NO_REPEAT_NGRAM = 3
 MODEL_ENV = "CAPTIONER_TRANSLATE_MODEL"
 
 # Target-language codes accepted by M2M100's tokenizer, with display names.
-# (M2M100's language set is 100 codes; this is the shortlist the UI offers —
+# (M2M100's language set is 100 codes; this is the shortlist the UI offers -
 # notably it has no Telugu, so "te" is absent rather than silently broken.)
-LANGUAGES: Dict[str, str] = {
+LANGUAGES: dict[str, str] = {
     "hi": "Hindi",
     "es": "Spanish",
     "fr": "French",
@@ -102,7 +102,7 @@ def default_cache_path() -> Path:
     return Path(config.PROJECT_ROOT) / "data" / "cache" / "translations.json"
 
 
-def _chunks(text: str, limit: int = MAX_CHARS) -> List[str]:
+def _chunks(text: str, limit: int = MAX_CHARS) -> list[str]:
     """Split ``text`` on word boundaries so no chunk exceeds ``limit`` chars."""
     if len(text) <= limit:
         return [text]
@@ -126,13 +126,13 @@ class Translator:
 
     def __init__(
         self,
-        model_name: Optional[str] = None,
-        cache_path: Optional[Path] = None,
-        device: Optional[str] = None,
+        model_name: str | None = None,
+        cache_path: Path | None = None,
+        device: str | None = None,
         batch_size: int = 16,
         num_beams: int = BEAM_SIZE,
         no_repeat_ngram: int = NO_REPEAT_NGRAM,
-        translate_fn: Optional[Callable[[Sequence[str], str], List[str]]] = None,
+        translate_fn: Callable[[Sequence[str], str], list[str]] | None = None,
     ):
         self.model_name = model_name or os.environ.get(MODEL_ENV) or MODEL_NAME
         self.num_beams = num_beams
@@ -143,10 +143,10 @@ class Translator:
         self._translate_fn = translate_fn
         self._model = None
         self._tokenizer = None
-        self._cache: Optional[Dict[str, str]] = None
+        self._cache: dict[str, str] | None = None
 
-    # --- cache -----------------------------------------------------------
-    def _load_cache(self) -> Dict[str, str]:
+    #cache
+    def _load_cache(self) -> dict[str, str]:
         if self._cache is None:
             try:
                 self._cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
@@ -155,7 +155,7 @@ class Translator:
         return self._cache
 
     @staticmethod
-    def cache_key(target: str, text: str, model: Optional[str] = None) -> str:
+    def cache_key(target: str, text: str, model: str | None = None) -> str:
         """Cache identity for one line.
 
         The default model keeps the original key shape so caches written before
@@ -163,7 +163,7 @@ class Translator:
         into the key, because its output is not interchangeable.
         """
         tag = target if model in (None, MODEL_NAME) else f"{model}|{target}"
-        return hashlib.sha1(f"{tag}\x1f{text}".encode("utf-8")).hexdigest()
+        return hashlib.sha1(f"{tag}\x1f{text}".encode()).hexdigest()
 
     def save_cache(self) -> None:
         """Write the cache atomically (temp file + replace), like the editor."""
@@ -179,7 +179,7 @@ class Translator:
             Path(tmp).unlink(missing_ok=True)
             raise
 
-    # --- model -----------------------------------------------------------
+    #model
     def _ensure_model(self) -> None:
         if self._model is not None or self._translate_fn is not None:
             return
@@ -211,7 +211,7 @@ class Translator:
         except Exception:
             return False
 
-    def _run(self, texts: Sequence[str], target: str) -> List[str]:
+    def _run(self, texts: Sequence[str], target: str) -> list[str]:
         if self._translate_fn is not None:
             return list(self._translate_fn(texts, target))
         import torch
@@ -220,7 +220,7 @@ class Translator:
         code = language_code(target)
         self._tokenizer.src_lang = SOURCE_LANG
         bos = self._tokenizer.get_lang_id(code)
-        out: List[str] = []
+        out: list[str] = []
         for start in range(0, len(texts), self.batch_size):
             batch = list(texts[start: start + self.batch_size])
             encoded = self._tokenizer(
@@ -240,8 +240,8 @@ class Translator:
             )
         return out
 
-    # --- public API ------------------------------------------------------
-    def translate_many(self, texts: Sequence[str], target: str) -> List[str]:
+    #public API
+    def translate_many(self, texts: Sequence[str], target: str) -> list[str]:
         """Translate ``texts`` to ``target``, using the cache for repeats.
 
         The returned list matches the input order and length; only strings that
@@ -255,8 +255,8 @@ class Translator:
         missing = [i for i, key in enumerate(keys) if key not in cache]
         if missing:
             # Split over-long strings, then stitch each answer back together.
-            flat: List[str] = []
-            owner: List[int] = []
+            flat: list[str] = []
+            owner: list[int] = []
             for index in missing:
                 pieces = _chunks(texts[index])
                 flat.extend(pieces)
@@ -266,8 +266,8 @@ class Translator:
                 raise RuntimeError(
                     f"translator returned {len(translated)} results for {len(flat)} inputs"
                 )
-            rebuilt: Dict[int, List[str]] = {}
-            for piece, index in zip(translated, owner):
+            rebuilt: dict[int, list[str]] = {}
+            for piece, index in zip(translated, owner, strict=True):
                 rebuilt.setdefault(index, []).append(piece)
             for index, parts in rebuilt.items():
                 cache[keys[index]] = " ".join(p.strip() for p in parts if p.strip())
@@ -285,22 +285,34 @@ class Translator:
         )
 
 
+def default_translator():
+    """The configured translation backend.
+
+    Local M2M100 unless ``CAPTIONER_MT_ENGINE`` names another one (see
+    ``captioner.engines``). Any object with ``translate_many(texts, target)``
+    works, so a backend never has to be a ``Translator`` subclass.
+    """
+    from .engines import mt
+
+    return mt()
+
+
 def translate_blocks(
     blocks: Sequence[Block],
     target: str,
-    translator: Optional[Translator] = None,
-) -> List[Block]:
+    translator=None,
+) -> list[Block]:
     """Translate every block in one batch, keeping speaker labels verbatim."""
-    translator = translator or Translator()
+    translator = translator or default_translator()
     prefixes = [SPEAKER_PREFIX.match(block.text) for block in blocks]
     bare = [
         block.text if match is None else block.text[match.end():]
-        for block, match in zip(blocks, prefixes)
+        for block, match in zip(blocks, prefixes, strict=True)
     ]
     translated = translator.translate_many(bare, target)
 
-    out: List[Block] = []
-    for block, match, text in zip(blocks, prefixes, translated):
+    out: list[Block] = []
+    for block, match, text in zip(blocks, prefixes, translated, strict=True):
         if match is not None:
             text = match.group(1) + text
         speaker = block.words[0].speaker if block.words else None
@@ -317,9 +329,9 @@ def translate_blocks(
 def translate_subtitles(
     out_dir: "str | Path",
     target: str,
-    translator: Optional[Translator] = None,
+    translator=None,
     speaker_names: bool = False,
-) -> List[Path]:
+) -> list[Path]:
     """Write ``captions.<lang>.srt`` / ``.vtt`` next to the original captions.
 
     Reads the existing ``captions.srt``, so translation is a pure

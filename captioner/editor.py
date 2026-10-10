@@ -13,9 +13,9 @@ silently corrupting the output files.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence, Tuple
 
 from . import config, srt
 from .segmenter import Block
@@ -48,7 +48,7 @@ class EditResult:
     vtt_path: Path
 
 
-def drafts_from_rows(rows) -> List[CaptionDraft]:
+def drafts_from_rows(rows) -> list[CaptionDraft]:
     """Build drafts from ``captions`` table rows (sqlite3.Row or dict-like)."""
     return [
         CaptionDraft(
@@ -61,15 +61,15 @@ def drafts_from_rows(rows) -> List[CaptionDraft]:
     ]
 
 
-def render(captions: Sequence[CaptionDraft]) -> Tuple[str, List[Tuple[int, int, int]]]:
+def render(captions: Sequence[CaptionDraft]) -> tuple[str, list[tuple[int, int, int]]]:
     """Render captions as the preview pane shows them, plus a highlight map.
 
     Returns ``(text, spans)`` where each span is ``(start_ms, end_ms,
     block_number)`` and ``block_number`` is the document block holding that
     caption's body line — the block playback highlighting scrolls to and tints.
     """
-    chunks: List[str] = []
-    spans: List[Tuple[int, int, int]] = []
+    chunks: list[str] = []
+    spans: list[tuple[int, int, int]] = []
     block_no = 0
     for caption in captions:
         text = (caption.text or "").strip()
@@ -84,14 +84,14 @@ def render(captions: Sequence[CaptionDraft]) -> Tuple[str, List[Tuple[int, int, 
     return "\n".join(chunks), spans
 
 
-def parse_preview(text: str) -> List[CaptionDraft]:
+def parse_preview(text: str) -> list[CaptionDraft]:
     """Parse the preview pane's text back into caption drafts.
 
     Raises :class:`CaptionParseError` with a caption number in the message for
     anything unreadable, so the UI can point at the problem.
     """
     lines = text.split("\n")
-    drafts: List[CaptionDraft] = []
+    drafts: list[CaptionDraft] = []
     i, total = 0, len(lines)
 
     while i < total:
@@ -117,7 +117,7 @@ def parse_preview(text: str) -> List[CaptionDraft]:
             raise CaptionParseError(f"caption {seq}: {exc}") from exc
         i += 1
 
-        body: List[str] = []
+        body: list[str] = []
         while i < total and lines[i].strip():
             body.append(lines[i].strip())
             i += 1
@@ -135,7 +135,7 @@ def parse_preview(text: str) -> List[CaptionDraft]:
     return drafts
 
 
-def load_drafts(conn, job_id: int) -> List[CaptionDraft]:
+def load_drafts(conn, job_id: int) -> list[CaptionDraft]:
     """Read a job's captions from the database as drafts."""
     rows = conn.execute(
         "SELECT seq, start_ms, end_ms, text FROM captions WHERE job_id = ? ORDER BY seq",

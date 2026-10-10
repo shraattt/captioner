@@ -43,7 +43,7 @@ def player(qapp):
     return Player()
 
 
-# --- can_decode -------------------------------------------------------------
+#can_decode
 
 
 class _FakeMode:
@@ -131,7 +131,7 @@ def test_can_decode_extension_matching_is_case_insensitive(monkeypatch):
     assert Player.can_decode("/some/dir/CLIP.WaV") is True
 
 
-# --- lazy construction / state ---------------------------------------------
+#lazy construction / state
 
 
 def test_player_does_not_build_qt_multimedia_until_needed(player):
@@ -160,7 +160,7 @@ def test_volume_and_mute_defaults_before_backend_exists(player):
     assert player.muted is False
 
 
-# --- signal forwarding ------------------------------------------------------
+#signal forwarding
 
 
 def test_duration_signal_is_forwarded_and_clamped(player):
@@ -215,7 +215,7 @@ def test_ignored_signal_hooks_match_qt_6_arity(player):
     player._on_active_tracks_changed()
 
 
-# --- real playback (needs a display) ---------------------------------------
+#real playback (needs a display)
 
 
 def _pump(app, seconds, predicate=None):

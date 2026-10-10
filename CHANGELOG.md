@@ -4,6 +4,72 @@ Versions follow the phases the project was built in. Numbers in the tables are
 measured on the development machine (RTX 4050 laptop, 6 GB VRAM, i5-12450HX,
 16 GB RAM) — they are floors for a real lecturer's audio, not promises.
 
+## 0.7.0 — Phase 6: reach (engines, HTTP API, automation, live translation)
+
+### Added
+- **Pluggable engines (`captioner/engines/`).** Recognition and translation are
+  now chosen from a registry instead of being imported directly:
+  `faster-whisper` and `m2m100` stay the local defaults, and `openai` backends
+  speak the `audio/transcriptions` and `chat/completions` wire protocols so any
+  compatible server works (OpenAI, Groq, LM Studio, faster-whisper-server,
+  vLLM). Selection is `CAPTIONER_ASR_ENGINE` / `CAPTIONER_MT_ENGINE`; every
+  backend reports `available()` with a reason, and `probe()` is exposed through
+  the API and the status bar. The API backends take an injected HTTP transport,
+  so their request building, response parsing and error mapping are tested with
+  no network at all.
+- **HTTP API + browser UI (`captioner/api.py`, `ui/web/`).** A stdlib-only JSON
+  API over the queue: health, engines, models, languages, jobs (list, create,
+  detail, captions as json/srt/vtt/text, retry, delete, translate) plus an
+  OpenAPI 3.0 description and a small browser page. `python cli.py api` runs it
+  standalone; **Tools → Toggle web API + UI** runs the same server inside the
+  dashboard. Loopback by default, and it refuses to bind elsewhere without a
+  token, because it can queue local files and return their transcripts.
+- **Watch folders + webhooks (`captioner/automation.py`).** One scanner feeds
+  both the dashboard's watch toggle and the new `python cli.py watch`, with
+  `CAPTIONER_WATCH_DIRS` for extra folders, idempotent queueing, and a
+  two-second settling window so a half-copied download is never captioned.
+  Settled jobs POST a JSON event to `CAPTIONER_WEBHOOK_URL` (optional shared
+  secret header); delivery is best-effort and can never change a job's outcome.
+- **Live translation.** The overlay can translate live captions as sentences
+  finish, on a background thread with the same on-disk cache the batch path
+  uses, chosen from **Live → Live translation** (or
+  `CAPTIONER_LIVE_TRANSLATE_TO` headless). The transcript window reads as a
+  bilingual transcript. A backend that cannot start is reported once and
+  disables itself; captions keep flowing in the source language.
+
+### Changed
+- **The dashboard is a package (`ui/dashboard/`).** The 2,000-line single
+  module became `window.py` plus mixins for jobs, preview, live and worker
+  control, with `theme.py`, `formatting.py`, `widgets.py`, `services.py` and
+  `constants.py` beside them - the largest module is now ~540 lines and each
+  file owns one concern. `from ui.dashboard import Dashboard` and
+  `PlaybackControls` still work; the app is launched with
+  `python -m ui.dashboard` (the `.bat`, `.vbs` and shortcut launchers were
+  updated).
+- **Comments are plain ASCII.** Decorative comment banners are gone and
+  typographic dashes were normalized inside comments (UI strings keep their own
+  glyphs - those are product design, not code clutter).
+- **Lint-clean.** `ruff check .` passes with no suppressions beyond two
+  documented per-file `E402` exemptions for the files that deliberately put the
+  project root on `sys.path`. Along the way this fixed a handful of real
+  issues: a lambda in the hotkey path that captured loop variables, an
+  undefined `SAMPLE_RATE` in a test helper, a duplicated status-color dict, a
+  dead `audio_secs` computation, and a version check that could never be false.
+- One version source: `captioner.__version__` feeds the dashboard and the API.
+
+### Fixed
+- `python cli.py languages` crashed on every call (the shortlist became a
+  `code -> name` map and the unpacking was never updated).
+- A first-run-only bug in `run_captioner.bat` (a stray blank line between every
+  statement) and LF line endings that `cmd.exe` misparses.
+
+### Verification
+- 360+ tests pass, including the new engine, API, automation and live
+  translation suites. The webhook tests talk to a real loopback HTTP server;
+  the API tests drive a real server through a real HTTP client (routing, status
+  codes, token auth, cross-origin writes, path traversal, oversize and
+  malformed bodies, queueing end to end).
+
 ## 0.6.0 — Phase 4 + Phase 5: fine-tuned models, and the rest of Phase 2
 
 ### Added

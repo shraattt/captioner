@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Captioner</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Captioner</h1>
+  <span class="muted" id="version"></span>
+  <span class="grow"></span>
+  <span class="chip" id="engine-asr" title="speech recognition backend"></span>
+  <span class="chip" id="engine-mt" title="translation backend"></span>
+  <span class="chip" id="queue" title="jobs by status"></span>
+</header>
+
+<section class="panel">
+  <h2>Queue a file</h2>
+  <form id="queue-form">
+    <input id="path" type="text" placeholder="C:\Videos\clip.mp4  (full path on the machine running the worker)" required>
+    <div class="row">
+      <label>Model <select id="model"></select></label>
+      <label>Translate to <select id="translate"><option value="">(no translation)</option></select></label>
+      <label class="check"><input type="checkbox" id="diarize"> speaker labels</label>
+      <label class="check"><input type="checkbox" id="align"> word alignment</label>
+      <button type="submit">Add to queue</button>
+    </div>
+  </form>
+  <p class="hint" id="watch-note"></p>
+</section>
+
+<section class="panel">
+  <h2>Jobs</h2>
+  <div class="scroll">
+    <table id="jobs">
+      <thead>
+        <tr><th>#</th><th>File</th><th>Status</th><th>Model</th><th>Progress</th><th>Created</th><th>Actions</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="panel" id="detail-panel" hidden>
+  <h2><span id="detail-title">Job</span> <button class="ghost" id="detail-close">close</button></h2>
+  <div class="row" id="detail-actions"></div>
+  <pre id="detail-body"></pre>
+</section>
+
+<section class="panel">
+  <h2>Access</h2>
+  <p class="hint">
+    This page talks to the API on the machine that runs the captioner. If the server was
+    started with a token (<code>CAPTIONER_API_TOKEN</code>), paste it here; it is kept in
+    this browser only.
+  </p>
+  <div class="row">
+    <input id="token" type="password" placeholder="bearer token (optional)">
+    <button id="token-save" type="button">Use token</button>
+  </div>
+</section>
+
+<div id="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

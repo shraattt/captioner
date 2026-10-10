@@ -24,7 +24,7 @@ if defined CAPTIONER_FIRST_RUN (
     timeout /t 4 >nul
 )
 
-".venv\Scripts\python" ui\dashboard.py %*
+".venv\Scripts\python" -m ui.dashboard %*
 set EXITCODE=%ERRORLEVEL%
 if not "%EXITCODE%"=="0" (
     echo.

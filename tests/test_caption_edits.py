@@ -18,8 +18,8 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from captioner import config, db, editor, srt, worker
 from captioner.segmenter import Block, Word
-from ui import dashboard as dashboard_mod
 from ui.dashboard import Dashboard
+from ui.dashboard import widgets as dashboard_widgets
 
 CAPTIONS = [
     (0, 1000, "Hello and welcome."),
@@ -81,7 +81,7 @@ def make_win(qapp, conn, monkeypatch):
 
     def factory():
         fake = FakePlayer()
-        monkeypatch.setattr(dashboard_mod, "Player", lambda parent=None: fake)
+        monkeypatch.setattr(dashboard_widgets, "Player", lambda parent=None: fake)
         win = Dashboard(conn=conn, persist_settings=False)
         win.timer.stop()
         win.fake_player = fake
@@ -120,7 +120,7 @@ def drafts(**overrides):
     return result
 
 
-# --- render / parse round-trip ---------------------------------------------
+#render / parse round-trip
 
 
 def test_render_shape_matches_the_old_preview_format():
@@ -141,7 +141,9 @@ def test_render_and_parse_are_inverse():
 def test_spans_point_at_the_caption_bodies():
     text, spans = editor.render(drafts())
     blocks = text.split("\n")
-    for (start, end, block_no), (exp_start, exp_end, expected) in zip(spans, CAPTIONS):
+    for (start, end, block_no), (exp_start, exp_end, expected) in zip(
+        spans, CAPTIONS, strict=True
+    ):
         assert blocks[block_no - 1].startswith("00:")  # the line above is the timing
         assert blocks[block_no] == expected
         assert (start, end) == (exp_start, exp_end)
@@ -163,7 +165,7 @@ def test_render_of_nothing_is_empty():
     assert editor.render([]) == ("", [])
 
 
-# --- parse validation -------------------------------------------------------
+#parse validation
 
 
 def test_parse_rejects_a_caption_with_no_number():
@@ -194,7 +196,7 @@ def test_parse_rejects_an_empty_editor():
         editor.parse_preview("   \n\n  \n")
 
 
-# --- apply_edits ------------------------------------------------------------
+#apply_edits
 
 
 def test_apply_edits_updates_the_database(conn, tmp_path):
@@ -285,7 +287,7 @@ def test_apply_edits_refuses_a_job_without_captions(conn, tmp_path):
         editor.apply_edits(conn, job_id, drafts())
 
 
-# --- dashboard flow ---------------------------------------------------------
+#dashboard flow
 
 
 def test_preview_is_editable_only_for_finished_jobs(make_win, conn, tmp_path):

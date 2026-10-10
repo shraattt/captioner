@@ -28,7 +28,7 @@ def fake_words(text_pairs):
     return [Word(text=t, start=s, end=e) for t, s, e in text_pairs]
 
 
-# --- the Viterbi alignment ------------------------------------------------
+#the Viterbi alignment
 def test_forced_align_finds_each_token_frame():
     path = [BLANK, 1, BLANK, 2, BLANK, 3, BLANK]
     spans = A.forced_align(emissions(path), [1, 2, 3])
@@ -51,7 +51,7 @@ def test_forced_align_spans_are_monotonic_and_non_overlapping():
     em[35, 3] += 6
     spans = A.forced_align(em, [1, 2, 3])
     assert all(s is not None for s in spans)
-    for (a_start, a_end), (b_start, b_end) in zip(spans, spans[1:]):
+    for (a_start, a_end), (b_start, _b_end) in zip(spans, spans[1:], strict=False):
         assert a_start <= a_end
         assert b_start >= a_end
 
@@ -70,7 +70,7 @@ def test_forced_align_reports_unused_token_as_none():
         assert 0 <= start <= end < 5
 
 
-# --- the realigner --------------------------------------------------------
+#the realigner
 def make_aligner(path, ids_and_owners):
     def logits_fn(audio):
         # The fake emissions are fixed; only their length tracks the slice.

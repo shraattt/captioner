@@ -1,7 +1,7 @@
 """Unit tests for the caption segmentation engine."""
 import pytest
 
-from captioner.segmenter import Block, Word, segment_words
+from captioner.segmenter import Word, segment_words
 
 
 def w(text: str, start: float, end: float) -> Word:

@@ -1,0 +1,61 @@
+name: CI
+
+# The app is Windows-only (WASAPI capture, the global hotkey, the win32
+# launchers), so the test job runs on Windows. Linting is platform-neutral
+# and lives on Linux for a fast first signal.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install ruff
+        run: python -m pip install --upgrade pip ruff
+      - name: Lint
+        run: ruff check .
+
+  test:
+    name: pytest (Windows, Python 3.11)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # Qt needs a platform plugin: offscreen runs the widgets with no display.
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # The declared minimum (pyproject: requires-python >=3.11). Local
+          # development happens on 3.13; add it to the matrix once the whole
+          # scientific stack ships wheels for it on this runner.
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
+          # pyannote.audio pulls torchcodec, whose Windows DLLs do not load;
+          # diarization reads audio through ffmpeg instead (see requirements.txt).
+          python -m pip uninstall -y torchcodec
+      - name: Show the environment that will be tested
+        run: |
+          python -c "import platform, sys; print(platform.platform(), sys.version)"
+          python -m pip list
+      - name: Tests
+        run: python -m pytest -q

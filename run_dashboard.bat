@@ -14,7 +14,7 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
-".venv\Scripts\python.exe" "ui\dashboard.py" %*
+".venv\Scripts\python.exe" -m ui.dashboard %*
 set EXITCODE=%ERRORLEVEL%
 if not "%EXITCODE%"=="0" (
     echo.

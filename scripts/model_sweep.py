@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 import psutil  # noqa: E402
 
-from captioner import config, transcribe  # noqa: E402
+from captioner import transcribe  # noqa: E402
 from captioner.segmenter import Word  # noqa: E402
 
 DEFAULT_SIZES = "tiny.en,base.en,small.en,distil-large-v3,medium"

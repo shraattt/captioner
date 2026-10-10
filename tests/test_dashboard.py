@@ -19,6 +19,14 @@ from captioner.segmenter import Block, Word
 from ui.dashboard import Dashboard
 
 
+def _settle(path, seconds=5):
+    """Backdate a file: the watch scanner skips files still being written."""
+    import os
+    import time
+
+    stamp = time.time() - seconds
+    os.utime(path, (stamp, stamp))
+
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance() or QApplication([])
@@ -185,8 +193,10 @@ def test_watch_folder_queues_new_files_once(make_win, conn, tmp_path, monkeypatc
     win = make_win()
     win.watch_check.setChecked(True)
 
-    (uploads / "lecture.mp4").write_bytes(b"x")
+    lecture = uploads / "lecture.mp4"
+    lecture.write_bytes(b"x")
     (uploads / "notes.txt").write_bytes(b"x")  # ignored
+    _settle(lecture)  # the scanner leaves a file that was just written alone
     win.refresh()
 
     names = [

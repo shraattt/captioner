@@ -81,7 +81,7 @@ def main() -> int:
         print(f"session {i+1:>3}: {Path(fixture).name:<18} words={n_words:>3} "
               f"decode={secs:5.2f}s rss={rss}MiB gpu={g.get('util','-')}%/{g.get('mem_mib','-')}MiB{flag}")
 
-    # ---- analysis -----------------------------------------------------
+    #analysis
     bad = [r for r in rows if not r["words_ok"]]
     first, last = rows[0], rows[-1]
     rss_growth = (last["rss_mib"] - first["rss_mib"]) if rows and first["rss_mib"] else 0

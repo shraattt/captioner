@@ -53,8 +53,10 @@ def main() -> int:
     tb = threading.Thread(target=batch_lane)
     tl = threading.Thread(target=live_lane)
     t0 = time.time()
-    tb.start(); tl.start()
-    tb.join(); tl.join()
+    tb.start()
+    tl.start()
+    tb.join()
+    tl.join()
     results["total_secs"] = round(time.time() - t0, 1)
 
     print(json.dumps(results, indent=1))

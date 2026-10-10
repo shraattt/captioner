@@ -17,8 +17,8 @@ from PySide6.QtWidgets import QApplication, QPlainTextEdit
 
 from captioner import config, db, worker
 from captioner.segmenter import Block, Word
-from ui import dashboard as dashboard_mod
 from ui.dashboard import Dashboard, PlaybackControls
+from ui.dashboard import widgets as dashboard_widgets
 
 
 @pytest.fixture(scope="module")
@@ -98,7 +98,7 @@ def make_win(qapp, conn, monkeypatch):
 
     def factory():
         fake = FakePlayer()
-        monkeypatch.setattr(dashboard_mod, "Player", lambda parent=None: fake)
+        monkeypatch.setattr(dashboard_widgets, "Player", lambda parent=None: fake)
         win = Dashboard(conn=conn, persist_settings=False)
         win.timer.stop()
         win.fake_player = fake
@@ -111,7 +111,7 @@ def make_win(qapp, conn, monkeypatch):
         win.close()
 
 
-# --- loading a job's media --------------------------------------------------
+#loading a job's media
 
 
 def test_starts_disabled_with_nothing_loaded(controls):
@@ -178,7 +178,7 @@ def test_selecting_a_different_job_switches_the_source(controls, tmp_path):
     assert controls.fake.opened == [str(first), str(second)]
 
 
-# --- transport --------------------------------------------------------------
+#transport
 
 
 def test_play_pause_and_stop_wire_through(controls, tmp_path):
@@ -310,7 +310,7 @@ def test_seek_relative_clamps_to_the_media(controls, tmp_path):
     assert controls.fake.seeks == [0, 10_000]
 
 
-# --- volume / mute ----------------------------------------------------------
+#volume / mute
 
 
 def test_volume_slider_sets_player_volume(controls):
@@ -336,7 +336,7 @@ def test_mute_shortcut_toggle_flips_the_button(controls):
     assert controls.fake.muted is False
 
 
-# --- errors -----------------------------------------------------------------
+#errors
 
 
 def test_player_error_is_shown_to_the_user(controls, tmp_path):
@@ -365,7 +365,7 @@ def test_loading_another_job_clears_a_previous_error(controls, tmp_path):
     assert controls.lbl_error.isHidden() is True
 
 
-# --- caption highlighting ---------------------------------------------------
+#caption highlighting
 
 
 def _preview_with(ctrl, lines):
@@ -420,7 +420,7 @@ def test_stop_clears_the_highlight(controls):
     assert preview.extraSelections() == []
 
 
-# --- dashboard integration --------------------------------------------------
+#dashboard integration
 
 
 def _seed_done_job(conn, tmp_path, name="clip.mp4"):
@@ -464,7 +464,7 @@ def test_dashboard_spans_line_up_with_the_rendered_captions(make_win, conn, tmp_
     text, spans = win._build_preview(job_id)
     blocks = text.split("\n")
     assert len(spans) == 2
-    for start, end, block_no in spans:
+    for _start, _end, block_no in spans:
         # the highlighted block must be the caption body, not its index/timing
         assert blocks[block_no - 1].startswith("00:")
         assert not blocks[block_no].startswith("0")

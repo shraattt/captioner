@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from captioner.live import LiveEngine, LiveState, MicCapture, STRIDE_SECONDS
+from captioner.live import SAMPLE_RATE, STRIDE_SECONDS, LiveEngine, LiveState
 
 pytest.importorskip("PySide6.QtWidgets")
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -27,7 +27,6 @@ class FakeCapture:
     """Stands in for MicCapture: feedable frames, no hardware."""
 
     def __init__(self):
-        from captioner.live import SAMPLE_RATE
 
         self.total_frames = 0
         self.ring_seconds = 60.0
@@ -59,9 +58,7 @@ class FakeEngine:
         return self.calls_state
 
 
-# ---------------------------------------------------------------------------
 # overlay rendering
-# ---------------------------------------------------------------------------
 
 def test_overlay_shows_idle_hint(qapp):
     ov = LiveOverlay(persist_settings=False)
@@ -121,9 +118,7 @@ def QtWindowStaysOnTop():
     return Qt.WindowType.WindowStaysOnTopHint
 
 
-# ---------------------------------------------------------------------------
 # worker loop
-# ---------------------------------------------------------------------------
 
 def test_worker_emits_states_until_stopped(qapp):
     seen = []
@@ -164,9 +159,7 @@ def test_stride_matches_design():
     assert STRIDE_SECONDS == pytest.approx(1.5)
 
 
-# ---------------------------------------------------------------------------
 # optional: a real device, if the machine has one (not a CI dependency)
-# ---------------------------------------------------------------------------
 
 def test_real_device_enumerates():
     try:

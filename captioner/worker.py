@@ -15,15 +15,37 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Callable, List, Optional
 
-from . import config, db, srt
+from . import automation, config, srt
+from .engines import asr as asr_engine
 from .segmenter import Block, segment_words
-from .transcribe import TranscriptionCancelled, transcribe_words
+from .transcribe import TranscriptionCancelled
 
 logger = logging.getLogger(__name__)
 
 POLL_SECONDS = config.WORKER_POLL_SECONDS
+
+
+def transcribe_words(
+    audio_path: str,
+    model_size: str = None,
+    on_progress=None,
+    on_stage=None,
+    should_cancel=None,
+):
+    """Transcribe through the configured ASR backend.
+
+    The backend is chosen by ``captioner.engines`` (``CAPTIONER_ASR_ENGINE``,
+    default local faster-whisper). This stays a module-level function so the
+    pipeline and the tests both keep calling one name.
+    """
+    return asr_engine().transcribe_words(
+        audio_path,
+        model_size,
+        on_progress=on_progress,
+        on_stage=on_stage,
+        should_cancel=should_cancel,
+    )
 
 # A running job whose heartbeat is older than this has no live owner: the
 # process that claimed it is gone (crash, closed window, killed terminal).
@@ -51,14 +73,14 @@ class JobStatusWriter:
         self.interval = interval
         self._path = conn.execute("PRAGMA database_list").fetchone()[2]
         self._lock = threading.Lock()
-        self._stage: Optional[str] = None
-        self._fraction: Optional[float] = None
+        self._stage: str | None = None
+        self._fraction: float | None = None
         self._dirty = False
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._thread: threading.Thread | None = None
 
-    # --- called from any thread ---
-    def note(self, stage: Optional[str] = None, fraction: Optional[float] = None) -> None:
+    #called from any thread
+    def note(self, stage: str | None = None, fraction: float | None = None) -> None:
         """Record the job's latest stage (and fraction, if one is known)."""
         with self._lock:
             if stage is not None:
@@ -67,7 +89,7 @@ class JobStatusWriter:
                 self._fraction = max(0.0, min(1.0, float(fraction)))
             self._dirty = True
 
-    # --- lifecycle ---
+    #lifecycle
     def start(self) -> None:
         if not self._path:
             return  # in-memory database (tests): nothing to heartbeat
@@ -94,7 +116,7 @@ class JobStatusWriter:
         finally:
             conn.close()
 
-    def _flush(self, conn: Optional[sqlite3.Connection] = None) -> None:
+    def _flush(self, conn: sqlite3.Connection | None = None) -> None:
         own = conn is None
         if own:
             try:
@@ -130,7 +152,7 @@ def enqueue(
     model_size: str = None,
     diarize: bool = False,
     align: bool = False,
-    translate_to: Optional[str] = None,
+    translate_to: str | None = None,
 ) -> int:
     """Add a file to the queue; returns the job id.
 
@@ -174,7 +196,7 @@ def claim_next(conn) -> dict:
     return dict(row)
 
 
-def run_pipeline(conn, job: dict, cancel: Optional[threading.Event] = None) -> None:
+def run_pipeline(conn, job: dict, cancel: threading.Event | None = None) -> None:
     """Execute one claimed job; flips it to done, error, or canceled.
 
     ``cancel`` is an optional event the UI sets to abort mid-job: the
@@ -189,7 +211,7 @@ def run_pipeline(conn, job: dict, cancel: Optional[threading.Event] = None) -> N
         _set_progress(conn, job_id, fraction)  # caller's thread: visible at once
         status.note(stage="transcribing", fraction=fraction)
 
-    def on_stage(stage: str, fraction: Optional[float]) -> None:
+    def on_stage(stage: str, fraction: float | None) -> None:
         status.note(stage=stage, fraction=fraction)
 
     try:
@@ -244,15 +266,27 @@ def run_pipeline(conn, job: dict, cancel: Optional[threading.Event] = None) -> N
     except TranscriptionCancelled:
         _settle(conn, job_id, "canceled")
         logger.info("Job %d canceled by the user", job_id)
-    except Exception as exc:  # noqa: BLE001 — worker must survive anything
+    except Exception as exc:  # noqa: BLE001 - worker must survive anything
         logger.exception("Job %d failed", job_id)
         _settle(conn, job_id, "error", f"{type(exc).__name__}: {exc}")
     finally:
         status.stop()
+        # A settled job is the automation trigger. The webhook is optional and
+        # best-effort, so it runs last and cannot change the job's outcome.
+        notify_webhook(conn, job_id)
+
+
+def notify_webhook(conn, job_id: int) -> bool:
+    """Fire the configured webhook for a settled job (never raises)."""
+    try:
+        return automation.notify_job(conn, job_id)
+    except Exception as exc:  # noqa: BLE001 - notification only
+        logger.warning("webhook notification failed for job %s: %s", job_id, exc)
+        return False
 
 
 def _translate_output(out_dir: Path, target: str, diarized: bool,
-                      on_stage) -> Optional[str]:
+                      on_stage) -> str | None:
     """Write ``captions.<lang>.srt/.vtt`` for a finished job (best effort).
 
     Returns a warning string when translation failed: the transcript itself is
@@ -277,7 +311,7 @@ def _diarize_turns(path: str):
     return diarize(path)
 
 
-def _settle(conn, job_id: int, status: str, error: Optional[str] = None) -> None:
+def _settle(conn, job_id: int, status: str, error: str | None = None) -> None:
     """Mark a job finished, clearing the live-run bookkeeping columns."""
     conn.execute(
         "UPDATE jobs SET status = ?, progress = NULL, stage = NULL, "
@@ -313,7 +347,7 @@ def recover_stale(conn, max_age_seconds: float = STALE_AFTER_SECONDS) -> int:
     return len(stale)
 
 
-def _age_seconds(stamp: Optional[str], now: float) -> float:
+def _age_seconds(stamp: str | None, now: float) -> float:
     """Seconds since a DB timestamp; unreadable or missing counts as forever."""
     if not stamp:
         return _FOREVER
@@ -328,12 +362,12 @@ def _age_seconds(stamp: Optional[str], now: float) -> float:
 _FOREVER = 1e9
 
 
-def seconds_since(stamp: Optional[str]) -> float:
+def seconds_since(stamp: str | None) -> float:
     """How long ago a DB timestamp was written (for staleness display)."""
     return _age_seconds(stamp, time.time())
 
 
-def _store_captions(conn, job_id: int, blocks: List[Block], diarize: bool = False) -> None:
+def _store_captions(conn, job_id: int, blocks: list[Block], diarize: bool = False) -> None:
     conn.execute("DELETE FROM captions WHERE job_id = ?", (job_id,))
     conn.executemany(
         "INSERT INTO captions (job_id, seq, start_ms, end_ms, text) "
@@ -371,7 +405,7 @@ def _set_progress(conn, job_id: int, fraction: float) -> None:
     conn.commit()
 
 
-def run_once(conn, cancel: Optional[threading.Event] = None) -> bool:
+def run_once(conn, cancel: threading.Event | None = None) -> bool:
     """Claim and process a single job. Returns True if work was done."""
     job = claim_next(conn)
     if not job:
@@ -380,7 +414,7 @@ def run_once(conn, cancel: Optional[threading.Event] = None) -> bool:
     return True
 
 
-def run_forever(conn, cancel: Optional[threading.Event] = None) -> None:
+def run_forever(conn, cancel: threading.Event | None = None) -> None:
     """Poll the queue until killed. Multiple instances may run safely."""
     logger.info("Worker polling every %.1fs...", POLL_SECONDS)
     while True:

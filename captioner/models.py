@@ -15,7 +15,6 @@ appear in the UI.
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from . import config
 
@@ -33,7 +32,7 @@ def finetuned_root() -> Path:
     return Path(config.DATA_DIR) / "ft"
 
 
-def _meta_for(directory: Path) -> Dict:
+def _meta_for(directory: Path) -> dict:
     """Training metadata for a converted checkpoint, if any.
 
     The converter copies ``ft_meta.json`` into the CTranslate2 directory; an
@@ -52,7 +51,7 @@ def _meta_for(directory: Path) -> Dict:
     return {}
 
 
-def find_finetuned(root: Optional[Path] = None) -> List[Dict]:
+def find_finetuned(root: Path | None = None) -> list[dict]:
     """Locally fine-tuned CTranslate2 models, newest name order.
 
     Each entry: ``{"label", "path", "meta"}``. A directory without
@@ -60,7 +59,7 @@ def find_finetuned(root: Optional[Path] = None) -> List[Dict]:
     rather than offered as a model that would fail to load.
     """
     root = Path(root) if root is not None else finetuned_root()
-    found: List[Dict] = []
+    found: list[dict] = []
     if not root.is_dir():
         return found
     for child in sorted(root.glob(f"*{FINETUNED_SUFFIX}")):
@@ -98,17 +97,17 @@ def resolve(label: str) -> str:
     raise ValueError(f"unknown model {label!r}")
 
 
-def live_choices(root: Optional[Path] = None) -> List[str]:
+def live_choices(root: Path | None = None) -> list[str]:
     """Labels for the live-caption picker: built-ins first, then fine-tuned."""
     return list(LIVE_BUILTIN) + [e["label"] for e in find_finetuned(root)]
 
 
-def batch_choices(root: Optional[Path] = None) -> List[str]:
+def batch_choices(root: Path | None = None) -> list[str]:
     """Labels for the batch model picker (same idea, batch defaults)."""
     return list(BATCH_BUILTIN) + [e["label"] for e in find_finetuned(root)]
 
 
-def describe(label: str, root: Optional[Path] = None) -> str:
+def describe(label: str, root: Path | None = None) -> str:
     """One-line human description for a picker entry or status line."""
     if is_builtin(label):
         return label

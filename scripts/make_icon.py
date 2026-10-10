@@ -64,7 +64,7 @@ def draw_icon(size: int) -> QPixmap:
 
 
 def main() -> int:
-    app = QApplication.instance() or QApplication([])
+    _app = QApplication.instance() or QApplication([])  # keep it alive
     icon = QIcon(draw_icon(256))
     ok = icon.pixmap(256, 256).save(OUT, "ICO")
     if not ok:

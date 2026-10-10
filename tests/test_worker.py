@@ -302,7 +302,7 @@ def test_retry_clears_live_run_bookkeeping(tmp_db):
     assert row["started_at"] is None
 
 
-# --- cancellation -----------------------------------------------------------
+#cancellation
 
 
 def test_cancel_marks_the_job_canceled_and_writes_nothing(tmp_db, monkeypatch):
@@ -364,7 +364,7 @@ def test_canceled_job_is_not_claimed_again(tmp_db, monkeypatch):
     ).fetchone()["status"] == "canceled"
 
 
-# --- heartbeat --------------------------------------------------------------
+#heartbeat
 
 
 def test_heartbeat_keeps_ticking_while_a_job_is_blocked(tmp_db, monkeypatch):
@@ -431,7 +431,7 @@ def test_seconds_since_reports_age(tmp_db):
     assert seconds_since(time.strftime("%Y-%m-%d %H:%M:%S")) < 5
 
 
-# --- crash recovery ---------------------------------------------------------
+#crash recovery
 
 
 def test_recover_stale_leaves_a_live_job_alone(tmp_db):

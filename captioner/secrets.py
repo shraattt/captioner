@@ -11,7 +11,6 @@ win over the file.
 """
 import os
 from pathlib import Path
-from typing import Dict, Optional, Union
 
 # Project root = parent of the captioner/ package directory.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,13 +18,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _TOKEN_VARS = ("HF_TOKEN", "HUGGINGFACE_TOKEN", "HUGGING_FACE_HUB_TOKEN")
 
 
-def load_env_file(path: Optional[Union[str, Path]] = None) -> Dict[str, str]:
+def load_env_file(path: str | Path | None = None) -> dict[str, str]:
     """Load KEY=value pairs from .env into os.environ (existing env wins).
 
     Returns the dict of variables actually set by the file.
     """
     env_path = Path(path) if path is not None else PROJECT_ROOT / ".env"
-    loaded: Dict[str, str] = {}
+    loaded: dict[str, str] = {}
     if not env_path.exists():
         return loaded
 
@@ -42,7 +41,7 @@ def load_env_file(path: Optional[Union[str, Path]] = None) -> Dict[str, str]:
     return loaded
 
 
-def hf_token(env_path: Optional[Union[str, Path]] = None) -> Optional[str]:
+def hf_token(env_path: str | Path | None = None) -> str | None:
     """Return the Hugging Face token from env or .env, loading the file once."""
     load_env_file(env_path)
     for var in _TOKEN_VARS:

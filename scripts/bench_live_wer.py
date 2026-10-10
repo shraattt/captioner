@@ -53,9 +53,9 @@ def wer(reference, hypothesis) -> float:
 
 def make_reference() -> dict:
     """Ground truth: transcribe each fixture whole with the batch model."""
+    import numpy as np
     from faster_whisper.audio import decode_audio
 
-    import numpy as np
     from captioner import transcribe
 
     model = transcribe.get_model(
@@ -96,7 +96,6 @@ def run_config(fixtures: dict, model_size: str, beam: int, window: float,
             secs = time.time() - t0
             hyp = normalize(" ".join(t for _s, _e, t in engine.state.full_words))
             ref = normalize(ref_text)
-            audio_secs = L.SAMPLE_RATE * 0  # measured below via file length
             rows.append({
                 "fixture": name, "wer": wer(ref, hyp),
                 "ref_words": len(ref), "hyp_words": len(hyp),

@@ -18,7 +18,6 @@ limits; a single word longer than a limit still keeps its own block (we
 never split mid-word).
 """
 from dataclasses import dataclass
-from typing import List, Optional
 
 from . import config
 
@@ -34,13 +33,13 @@ class Word:
     text: str
     start: float
     end: float
-    speaker: Optional[str] = None
+    speaker: str | None = None
 
 
 @dataclass
 class Block:
     """A caption block: grouped words + display window, in seconds."""
-    words: List[Word]
+    words: list[Word]
 
     @property
     def text(self) -> str:
@@ -74,19 +73,19 @@ def _ends_sentence(word: Word) -> bool:
 
 
 def segment_words(
-    words: List[Word],
+    words: list[Word],
     max_chars: int = config.SEGMENT_MAX_CHARS,
     max_seconds: float = config.SEGMENT_MAX_SECONDS,
     max_gap: float = config.SEGMENT_MAX_GAP,
     min_chars: int = config.SEGMENT_MIN_CHARS,
-) -> List[Block]:
+) -> list[Block]:
     """Group timed words into caption blocks (greedy, O(n)).
 
     Never splits mid-word; ensures start <= end and non-empty text on
     every emitted block. Words with None/invalid timing are skipped.
     """
-    blocks: List[Block] = []
-    current: List[Word] = []
+    blocks: list[Block] = []
+    current: list[Word] = []
 
     def flush() -> None:
         if current:

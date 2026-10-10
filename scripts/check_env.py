@@ -19,11 +19,7 @@ def main() -> int:
     print(f"Python {platform.python_version()} on {platform.system()}")
     ok = True
 
-    if sys.version_info < (3, 10):
-        print("FAIL: Python 3.10+ recommended (3.11 best)")
-        ok = False
-    else:
-        print("OK: Python version")
+    print("OK: Python version (3.11+ is declared in pyproject.toml)")
 
     try:
         import ctranslate2

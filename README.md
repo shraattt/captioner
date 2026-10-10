@@ -1,5 +1,7 @@
 # Captioner
 
+[![CI](https://github.com/shraattt/captioner/actions/workflows/ci.yml/badge.svg)](https://github.com/shraattt/captioner/actions/workflows/ci.yml)
+
 Local-first AI captioning for Windows. Drop in a lecture, interview or TV
 recording and get `SRT`/`VTT` subtitles out; or talk at your laptop and watch a
 floating caption bar transcribe you live over any app. Everything runs on your
@@ -7,7 +9,9 @@ own machine — no accounts, no servers, no cloud, and your audio never leaves t
 computer.
 
 Built and measured around a 6 GB-VRAM laptop GPU (RTX 4050), with a CPU fallback
-for everything except the fine-tuning scripts.
+for everything except the fine-tuning scripts. The recognition and translation
+backends are swappable, the queue has a local HTTP API and a browser UI, and a
+folder can be watched so files caption themselves.
 
 ![The Captioner dashboard](screenshots/dashboard.png)
 
@@ -22,6 +26,10 @@ for everything except the fine-tuning scripts.
 | **Translation** | Optional M2M100 translation writes `captions.hi.srt` / `.vtt` next to the originals, same timings, cached per line. |
 | **Edit in the app** | Fix a caption in the preview pane, save, and the SRT/VTT/database rows are rewritten atomically. |
 | **Fine-tuned models** | Fine-tune Whisper on noisy audio yourself; converted models appear in the model picker automatically. |
+| **Live translation** | Translate live captions as they appear, into any of 27 languages — on their own thread, cached per sentence, so the captions never wait. |
+| **Pluggable engines** | Point the recognizer or the translator at an OpenAI-compatible API (OpenAI, Groq, LM Studio, faster-whisper-server) with two environment variables; the local models stay the default. |
+| **HTTP API + browser UI** | A JSON API with an OpenAPI description (`/openapi.json`) plus a browser page, so scripts or another machine can drive the queue. |
+| **Watch folders + webhooks** | Caption everything dropped into a folder unattended, then POST each finished job to a URL. |
 | **Honest queue** | A real worker/queue with cancel, progress, heartbeats and crash recovery — a power cut cannot wedge it. |
 
 Measured on 100 held-out noisy clips (synthetic noise over LibriSpeech, RTX 4050
@@ -44,6 +52,7 @@ Measured on 100 held-out noisy clips (synthetic noise over LibriSpeech, RTX 4050
   - [Dashboard](#dashboard) · [Keyboard shortcuts](#keyboard-shortcuts) · [Editing captions](#editing-captions) · [Live captions](#live-captions) · [Command line](#command-line)
 - [Optional features](#optional-features)
   - [Speaker labels](#speaker-labels-diarization) · [Word alignment](#word-alignment) · [Translation](#translation)
+  - [Pluggable engines](#pluggable-engines) · [HTTP API and browser UI](#http-api-and-browser-ui) · [Watch folders and webhooks](#watch-folders-and-webhooks)
 - [How it works](#how-it-works)
 - [Fine-tuning your own model](#fine-tuning-your-own-model)
 - [Configuration](#configuration)
@@ -150,7 +159,7 @@ the initial setup needs to show download progress.
 ### Dashboard
 
 ```powershell
-.venv\Scripts\python ui\dashboard.py        # or run_dashboard.bat
+.venv\Scripts\python -m ui.dashboard      # or run_dashboard.bat
 ```
 
 The window has a calm header (Add files / Start worker / worker status pill /
@@ -162,6 +171,9 @@ selected job, the caption editor, and a slim player docked at the bottom.
   notifications.
 - **Right-click a row** for per-job actions: cancel, retry, remove, open output
   folder, copy path.
+- **Tools → Toggle web API + UI** serves the queue over HTTP (loopback by
+  default) and prints the URL in the status bar; `python cli.py api` serves the
+  same thing standalone.
 - Everything applies to **newly queued files**; a job keeps the options it was
   created with, even if you change the checkboxes later.
 
@@ -201,6 +213,12 @@ A floating bar appears with a level meter; drag it anywhere, or right-click it:
 - **Show transcript window** — the whole session so far, scrollable.
 - Hovering the bar reveals **stop**; `Ctrl+Alt+L` toggles from any app.
 
+**Live → Live translation** picks a language for the *live* captions: finished
+sentences are translated off the audio thread and shown under the captions (and
+in the transcript window, as a bilingual read-back). The same menu turns it off.
+The first sentence in a new language loads that model — one pause — and
+every sentence after it is cached.
+
 `tiny.en` is the default live model because it measured most accurate on clear
 audio; `base.en`/`small.en` trade latency for robustness on noisy sources, and
 any [fine-tuned model](#fine-tuning-your-own-model) you convert shows up in the
@@ -218,6 +236,8 @@ Everything the dashboard does is scriptable:
 .venv\Scripts\python cli.py retry 12               # requeue a job
 .venv\Scripts\python cli.py translate 12 --to ta   # add subtitles in another language
 .venv\Scripts\python cli.py languages              # list translation targets
+.venv\Scripts\python cli.py watch --dir D:\Shows   # caption a folder unattended
+.venv\Scripts\python cli.py api --open             # serve the HTTP API + browser UI
 ```
 
 | Command | Options |
@@ -228,6 +248,8 @@ Everything the dashboard does is scriptable:
 | `retry <job_id>` | — |
 | `translate <job_id>` | `--to LANG` (required), `--model HF_REPO_OR_DIR` |
 | `languages` | — |
+| `watch` | `--dir PATH` (repeatable), `--interval SECONDS`, `--diarize`, `--align`, `--translate-to LANG` |
+| `api` | `--host`, `--port`, `--token`, `--open` |
 
 **Long runs, cancels and crashes.** Progress is real: `downloading model 42%`,
 `loading model`, `transcribing 87%`. A running job can be canceled and settles as
@@ -295,6 +317,96 @@ same speaker labels, speaker tags never translated. Because it reads
   `--model facebook/m2m100_1.2B` when a language reads badly.
 - A failed translation **never** discards a finished transcript: the warning
   shows in the job's error column and the captions stay put.
+
+### Pluggable engines
+
+Recognition and translation both go through a registry (`captioner/engines/`):
+a backend is a name plus a small interface, and the pipeline, the UI and the CLI
+never import one directly. Selection is an environment variable, so swapping a
+model never means touching code.
+
+| Kind | Name | What it is |
+| --- | --- | --- |
+| asr | `faster-whisper` | local CTranslate2 models, GPU or CPU (the default) |
+| asr | `openai` | `POST /audio/transcriptions` — OpenAI, or any compatible server |
+| mt | `m2m100` | local M2M100 through transformers (the default) |
+| mt | `openai` | `POST /chat/completions` — OpenAI, Groq, OpenRouter, LM Studio, vLLM |
+
+```powershell
+set CAPTIONER_ASR_ENGINE=openai
+set OPENAI_API_KEY=sk-...
+set CAPTIONER_ASR_MODEL=whisper-1
+# a local OpenAI-compatible server works the same way:
+set CAPTIONER_API_BASE_URL=http://127.0.0.1:8000/v1
+.venv\Scripts\python cli.py add lecture.mp4
+```
+
+`GET /api/engines` (and `captioner.engines.probe`) reports every registered
+backend, whether the selected one is usable right now, and why not. The API
+backends take an injectable HTTP transport, so the test suite exercises their
+request/response handling without a network.
+
+### HTTP API and browser UI
+
+```powershell
+.venv\Scripts\python cli.py api --open      # http://127.0.0.1:8765/
+```
+
+Built on the standard library — no web framework, no extra dependency, in
+keeping with "the machine that can run this can serve this".
+
+| Route | What it does |
+| --- | --- |
+| `GET /api/health` | version, queue counts, selected engines, watched folders |
+| `GET /api/engines` | every backend, its description and its availability |
+| `GET /api/models` · `GET /api/languages` | the pickers' options |
+| `GET /api/jobs` · `POST /api/jobs` | list the queue (newest first) / queue a file |
+| `GET /api/jobs/{id}` · `DELETE /api/jobs/{id}` | one job with its caption blocks / remove it |
+| `GET /api/jobs/{id}/captions?format=json` | the captions as rows (`srt`, `vtt`, `text` too) |
+| `POST /api/jobs/{id}/retry` · `POST /api/jobs/{id}/translate` | requeue, or write `captions.<lang>.srt` |
+| `GET /` · `GET /openapi.json` | the browser UI, and an OpenAPI 3.0 description of all of it |
+
+```powershell
+# queue a file and read back its captions, with no UI at all
+curl -X POST http://127.0.0.1:8765/api/jobs -H "Content-Type: application/json" ^
+     -d "{\"path\": \"D:\\Shows\\talk.mp4\", \"align\": true}"
+curl http://127.0.0.1:8765/api/jobs/1/captions?format=srt
+```
+
+**Security.** The server binds `127.0.0.1` unless `CAPTIONER_API_HOST` says
+otherwise, and it refuses to start on a non-loopback address without a token,
+because this API queues local files and returns their transcripts. With
+`CAPTIONER_API_TOKEN` set, every request needs `Authorization: Bearer <token>`
+(or `?token=`); mutating requests from another origin are rejected; the static
+UI is confined to `ui/web/`.
+
+### Watch folders and webhooks
+
+**Options → Watch uploads folder** in the dashboard, or `cli.py watch`, queues
+anything that appears in `data/uploads`; `CAPTIONER_WATCH_DIRS` adds more
+folders. The scan is idempotent (a path already in the queue is never queued
+twice) and a file written to within the last two seconds is left for the next
+tick, so a half-finished download is never captioned.
+
+Set `CAPTIONER_WEBHOOK_URL` and every job that settles POSTs one JSON body:
+
+```json
+{
+  "event": "job.done",
+  "sent_at": "2026-10-11T09:41:02",
+  "job": {
+    "id": 12, "file_name": "lecture.mp4", "status": "done",
+    "captions": 214, "duration_ms": 3721000,
+    "outputs": ["captions.hi.srt", "captions.srt", "captions.vtt"],
+    "options": {"diarize": false, "align": true, "translate_to": "hi"}
+  }
+}
+```
+
+The webhook is best-effort by design: a timeout, a 500 or a dead endpoint is
+logged and returns `False` — it never changes a job's outcome and never takes
+the worker down. `CAPTIONER_WEBHOOK_SECRET` adds an `X-Captioner-Secret` header
+so the receiver can tell a real delivery from a stranger.
 
 ## How it works
 
@@ -423,6 +535,13 @@ top of `captioner/live.py`. Environment variables:
 | `CAPTIONER_CUDA_BIN` | Extra directory to look in for `cublas64_12.dll`/`cudnn64_9.dll`. |
 | `CAPTIONER_NO_GLOBAL_HOTKEY=1` | Never claim `Ctrl+Alt+L` system-wide (used by the test suite). |
 | `CAPTIONER_TRANSLATE_MODEL` | Override the translation model without touching code. |
+| `CAPTIONER_ASR_ENGINE` · `CAPTIONER_MT_ENGINE` | Pick a backend (`faster-whisper`/`openai`, `m2m100`/`openai`). |
+| `CAPTIONER_API_BASE_URL` · `OPENAI_API_KEY` | Endpoint and key for the API backends (any OpenAI-compatible server). |
+| `CAPTIONER_ASR_MODEL` · `CAPTIONER_MT_MODEL` | Model names for those backends (defaults: `whisper-1`, `gpt-4o-mini`). |
+| `CAPTIONER_LIVE_TRANSLATE_TO` | Language for live captions without a UI (empty = off). |
+| `CAPTIONER_WATCH_DIRS` | Extra folders to watch, separated by `;` (or the platform separator). |
+| `CAPTIONER_WEBHOOK_URL` · `CAPTIONER_WEBHOOK_SECRET` | Where settled jobs are POSTed, and the shared secret header. |
+| `CAPTIONER_API_HOST` · `CAPTIONER_API_PORT` · `CAPTIONER_API_TOKEN` | HTTP API bind address, port and bearer token. |
 
 ## Where your files live
 
@@ -486,20 +605,31 @@ sessions — no leaks), `stress_mixed.py` (batch + live sharing the GPU),
 .venv\Scripts\python -m pytest
 ```
 
-250+ tests covering segmentation, subtitle writers, the caption editor,
-diarization, alignment, translation, the model registry, the queue/pipeline
+360+ tests covering segmentation, subtitle writers, the caption editor,
+diarization, alignment, translation, the engine registry and both API backends,
+the HTTP API (routing, status codes, token auth, cross-origin writes, path
+traversal, queueing end to end), the watch scanner and webhook delivery against a
+real local HTTP server, live translation, the model registry, the queue/pipeline
 integration, the live engine and the overlay. The model layer is mocked, so the
 suite needs **no GPU and no downloads** (the one skip is the Windows hotkey
-keystroke test, which this session policy blocks).
+keystroke test, which this session policy blocks). CI runs `ruff check .` on Linux
+and the suite on Windows ([.github/workflows/ci.yml](.github/workflows/ci.yml));
+`pip install -r requirements-dev.txt` adds the linter locally.
 
 ## Project layout
 
 ```
 captioner/
 ├── captioner/                  core library
-│   ├── config.py               paths and tunables
+│   ├── config.py               paths, tunables, live-translation default
 │   ├── db.py                   SQLite schema + migrations
-│   ├── worker.py               queue claim, pipeline, heartbeat, recovery
+│   ├── worker.py               queue claim, pipeline, heartbeat, recovery, webhook
+│   ├── api.py                  HTTP API + browser UI (stdlib only)
+│   ├── automation.py           watch-folder scan + webhook delivery
+│   ├── engines/                pluggable backends
+│   │   ├── registry.py         register · resolve · create · probe
+│   │   ├── local.py            faster-whisper + M2M100 (the defaults)
+│   │   └── openai_compat.py    audio/transcriptions + chat/completions
 │   ├── transcribe.py           faster-whisper wrapper, model download/loading
 │   ├── segmenter.py            word timings → caption blocks
 │   ├── srt.py                  SRT/VTT writers + parser
@@ -507,20 +637,37 @@ captioner/
 │   ├── diarize.py              pyannote speaker turns
 │   ├── translate.py            M2M100 translation + cache
 │   ├── models.py               model registry (sizes + fine-tuned)
-│   ├── live.py                 capture, ring buffer, sliding decode
+│   ├── live.py                 capture, ring buffer, sliding decode, translation
 │   ├── editor.py               caption edit drafts
 │   └── player.py               audio transport
-├── ui/                         dashboard.py, overlay.py, hotkey.py
+├── ui/
+│   ├── dashboard/              the window, split by concern
+│   │   ├── window.py           menus, layout, status bar
+│   │   ├── jobs.py             queue actions + the table (JobQueueMixin)
+│   │   ├── preview.py          caption preview, playback, edits
+│   │   ├── live.py             live session setup + translation language
+│   │   ├── worker.py           the in-app worker thread and its controls
+│   │   ├── services.py         the web-API toggle
+│   │   ├── widgets.py          the playback control strip
+│   │   ├── theme.py            palette + stylesheet
+│   │   ├── formatting.py       duration/age/stage helpers
+│   │   └── constants.py        identity, columns, media filters
+│   ├── web/                    the browser UI (index.html, app.js, style.css)
+│   ├── overlay.py              live caption bar + transcript window
+│   └── hotkey.py               the global Ctrl+Alt+L registration
 ├── scripts/                    check_env · bench_1h · bench_live_wer · wer_check
 │                               model_sweep · stress_live · stress_mixed
 │                               ft_build_dataset · ft_train · ft_eval · ft_convert
 │                               verify_hf_access · make_shortcut · make_icon
 ├── tests/                      pytest suite (model layer mocked)
-├── cli.py                      command-line control
+├── .github/workflows/ci.yml    ruff + pytest on every push
+├── cli.py                      command-line control (add · status · work · watch · api)
 ├── run_captioner.bat           one-click setup + launch
 ├── Captioner.vbs               silent launcher (no console window)
 ├── run_dashboard.bat           launch the UI, keep errors visible
 ├── run_worker.bat              run the worker in a console
+├── requirements.txt            runtime dependencies (order matters: see the header)
+├── requirements-dev.txt        ruff
 ├── pyproject.toml              metadata + pytest/ruff config
 ├── CHANGELOG.md · BACKLOG.md   what shipped, what is deferred and why
 └── data/                       (created at runtime) see "Where your files live"
@@ -539,7 +686,9 @@ captioner/
   Seq2SeqTrainer on 6 GB, measured before/after WER.
 - **Phase 5 — CTranslate2 conversion + live swap: shipped.** Converted models
   appear in the picker next to the built-in sizes.
-- **Phase 6 — packaging and scale:** PyInstaller build, load test with a
+- **Phase 6 — reach: shipped.** Pluggable ASR/MT backends, a local HTTP API with
+  a browser UI, unattended watch folders, and outbound webhooks.
+- **Phase 7 — packaging and scale:** PyInstaller build, a load test with a
   documented concurrency ceiling, hardening. *Next.*
 
 ## Design trade-offs and known limitations
@@ -561,13 +710,28 @@ captioner/
   1.5 s). It is not a streaming model.
 - **Windows-first.** The overlay, the global hotkey and the launchers are
   Windows-specific; the core library is portable but untested on macOS/Linux.
+- **The HTTP API is loopback-first on purpose.** It can queue local files and
+  return their transcripts, so a non-loopback bind requires a token and
+  cross-origin writes are refused. It has no user accounts: one token, one
+  machine's queue.
+- **Live translation is a display feature.** The overlay and the transcript
+  window show it; a saved `.srt` from a live session is source-language only,
+  and the batch path (which writes `captions.<lang>.srt`) is the one with
+  subtitle-file translation.
+- **The API engines are unverified against live endpoints here.** Their wire
+  format, error mapping and response parsing are unit-tested through an
+  injected transport, but no test suite can stand in for one real call against
+  your provider.
 
 ## Privacy
 
 Everything runs locally: no telemetry, no accounts, no uploads. The only network
 traffic is downloading model weights from Hugging Face (and, if you use
 translation/alignment/diarization, those models' one-time downloads). Your media,
-transcripts and databases stay in `data/` on your machine.
+transcripts and databases stay in `data/` on your machine. The one exception is
+opt-in: selecting the `openai` **engine** sends that audio to the endpoint you
+configured, and selecting a webhook URL sends job metadata to it. Neither
+happens unless you set it, and neither is on by default.
 
 ## License
 

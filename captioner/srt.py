@@ -4,7 +4,7 @@ Both formats share the same shape (index/timestamp line, text, blank line);
 only the timestamp style differs: SRT uses comma milliseconds and a numeric
 index, VTT uses dot milliseconds and a WEBVTT header.
 """
-from typing import List, Sequence, Tuple
+from collections.abc import Sequence
 
 from .segmenter import Block
 
@@ -71,7 +71,7 @@ def parse_range(line: str) -> "tuple[int, int]":
 
 def _render(blocks: Sequence[Block], sep: str, numbered: bool, header: str,
             speaker_names: bool = False) -> str:
-    lines: List[str] = []
+    lines: list[str] = []
     if header:
         lines.append(header)
         lines.append("")
@@ -91,7 +91,7 @@ def _render(blocks: Sequence[Block], sep: str, numbered: bool, header: str,
     return "\n".join(lines)
 
 
-def parse_srt(text: str) -> List[Block]:
+def parse_srt(text: str) -> list[Block]:
     """Parse SRT (or WebVTT) text back into blocks — inverse of :func:`to_srt`.
 
     Tolerates CRLF line endings, a missing trailing blank line, and either
@@ -99,7 +99,7 @@ def parse_srt(text: str) -> List[Block]:
     loads. Multi-line captions are joined with a space, and any speaker label
     stays part of the text (it is a label, not a separate field).
     """
-    blocks: List[Block] = []
+    blocks: list[Block] = []
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     for chunk in normalized.split("\n\n"):
         lines = [line.strip() for line in chunk.split("\n") if line.strip()]

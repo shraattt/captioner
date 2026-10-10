@@ -8,7 +8,6 @@ ports 1:1 to Postgres if this ever becomes a service.
 """
 import sqlite3
 from pathlib import Path
-from typing import Optional, Union
 
 from . import config
 
@@ -21,7 +20,7 @@ JOB_COLUMNS = (
     "id", "file_path", "file_name", "file_hash", "status", "error",
     "model_size", "progress", "stage", "heartbeat_at",
     "created_at", "started_at", "finished_at",
-);
+)
 # Per-job processing options added over time (Phase 2 alignment/translation,
 # speaker labels). Existing databases gain them through the ALTER TABLE loop in
 # _migrate, so each tuple is (column name, DDL) and must stay additive.
@@ -66,7 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 """
 
 
-def connect(db_path: Optional[Union[str, Path]] = None) -> sqlite3.Connection:
+def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     """Open a connection with sane pragmas and the schema applied.
 
     Row values come back as sqlite3.Row (indexable by column name). WAL mode

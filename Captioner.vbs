@@ -14,5 +14,5 @@ If Not fso.FileExists(pyw) Then
     sh.Run """" & root & "\run_captioner.bat""", 1, False
 Else
     sh.CurrentDirectory = root
-    sh.Run """" & pyw & """ ui\dashboard.py", 0, False
+    sh.Run """" & pyw & """ -m ui.dashboard", 0, False
 End If

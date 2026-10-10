@@ -26,10 +26,10 @@ The model (facebook/wav2vec2-base-960h, ~380 MB) is English-only and loads on
 first use; ``model_is_cached`` lets the UI say so before the wait.
 """
 import logging
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
 
 from .segmenter import Word
 
@@ -53,7 +53,7 @@ def _log_softmax(x):
 
 def forced_align(
     log_probs, tokens: Sequence[int], blank_id: int = 0
-) -> List[Optional[Tuple[int, int]]]:
+) -> list[tuple[int, int] | None]:
     """Align ``tokens`` (non-blank ids, in order) to emission frames.
 
     ``log_probs`` is a (frames, vocab) array of log probabilities. Returns one
@@ -116,7 +116,7 @@ def forced_align(
         states[t] = s
         s = int(back[t, s])
 
-    spans: List[Optional[Tuple[int, int]]] = []
+    spans: list[tuple[int, int] | None] = []
     for i in range(n_tokens):
         frames = np.nonzero(states == 2 * i + 1)[0]
         spans.append(
@@ -135,9 +135,9 @@ class WordAligner:
     def __init__(
         self,
         model_name: str = ALIGN_MODEL,
-        device: Optional[str] = None,
-        logits_fn: Optional[Callable] = None,
-        token_ids_fn: Optional[Callable] = None,
+        device: str | None = None,
+        logits_fn: Callable | None = None,
+        token_ids_fn: Callable | None = None,
     ):
         self.model_name = model_name
         self.device = device
@@ -146,7 +146,7 @@ class WordAligner:
         self._model = None
         self._tokenizer = None
 
-    # --- model plumbing -------------------------------------------------
+    #model plumbing
     def _ensure_model(self) -> None:
         if self._model is not None or self._logits_fn is not None:
             return
@@ -185,8 +185,8 @@ class WordAligner:
         if self._token_ids_fn is not None:
             return self._token_ids_fn(text)
         self._ensure_model()
-        ids: List[int] = []
-        owners: List[Optional[int]] = []
+        ids: list[int] = []
+        owners: list[int | None] = []
         for word_index, word in enumerate(text.split()):
             for char in word.lower():
                 if char.isalnum() or char == "'":
@@ -196,7 +196,7 @@ class WordAligner:
             owners.append(None)
         return ids, owners
 
-    # --- the alignment itself -------------------------------------------
+    #the alignment itself
     def align(
         self,
         audio,
@@ -204,7 +204,7 @@ class WordAligner:
         window: float = WINDOW_SECONDS,
         margin: float = MARGIN_SECONDS,
         max_shift: float = MAX_SHIFT_SECONDS,
-    ) -> List[Word]:
+    ) -> list[Word]:
         """Return ``words`` with tightened start/end times (text/speaker kept)."""
         import numpy as np
 
@@ -213,7 +213,7 @@ class WordAligner:
             return []
 
         blank = self._blank_id()
-        refined: List[Word] = []
+        refined: list[Word] = []
         for group in _windows(words, window):
             start_seconds = max(0.0, group[0].start - margin)
             end_seconds = group[-1].end + margin
@@ -243,13 +243,13 @@ class WordAligner:
         spans = forced_align(log_probs, ids, blank_id=blank)
 
         per_word: dict = {}
-        for span, owner in zip(spans, owners):
+        for span, owner in zip(spans, owners, strict=False):
             if owner is None or span is None:
                 continue
             low, high = per_word.get(owner, (span[0], span[1]))
             per_word[owner] = (min(low, span[0]), max(high, span[1]))
 
-        out: List[Word] = []
+        out: list[Word] = []
         for i, word in enumerate(group):
             span = per_word.get(i)
             if span is None:
@@ -279,7 +279,7 @@ class WordAligner:
 
 def _windows(words: Sequence[Word], window: float):
     """Split words into time-bounded groups (a Viterbi pass per group)."""
-    group: List[Word] = []
+    group: list[Word] = []
     for word in words:
         if group and word.end - group[0].start > window:
             yield group
@@ -289,7 +289,7 @@ def _windows(words: Sequence[Word], window: float):
         yield group
 
 
-def _monotonic(words: List[Word]) -> List[Word]:
+def _monotonic(words: list[Word]) -> list[Word]:
     """Keep refined timings ordered and non-overlapping.
 
     Forced alignment is monotonic by construction, but falls back to original
@@ -297,7 +297,7 @@ def _monotonic(words: List[Word]) -> List[Word]:
     would start before its predecessor ends is nudged to the predecessor's end
     (and given a minimum span) rather than left inverted.
     """
-    out: List[Word] = []
+    out: list[Word] = []
     prev_end = -1.0
     for word in words:
         start, end = word.start, word.end
@@ -311,7 +311,7 @@ def _monotonic(words: List[Word]) -> List[Word]:
 
 
 @lru_cache(maxsize=2)
-def get_aligner(model_name: str = ALIGN_MODEL, device: Optional[str] = None) -> WordAligner:
+def get_aligner(model_name: str = ALIGN_MODEL, device: str | None = None) -> WordAligner:
     """Cached aligner, so a batch of jobs loads the model once."""
     return WordAligner(model_name=model_name, device=device)
 
@@ -332,9 +332,9 @@ def model_is_cached(model_name: str = ALIGN_MODEL) -> bool:
 def realign_file(
     audio_path: "str | Path",
     words: Sequence[Word],
-    aligner: Optional[WordAligner] = None,
-    on_stage: Optional[Callable] = None,
-) -> List[Word]:
+    aligner: WordAligner | None = None,
+    on_stage: Callable | None = None,
+) -> list[Word]:
     """Decode ``audio_path`` and re-time ``words`` against it.
 
     Returns the original list unchanged when the alignment model cannot be

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List, Optional
 
 from . import config
 from .segmenter import Block, Word, segment_words
@@ -103,7 +102,7 @@ def _audio_input(path: str) -> dict:
     return {"waveform": waveform, "sample_rate": 16000}
 
 
-def diarize(path: str, num_speakers: Optional[int] = None) -> List[SpeakerTurn]:
+def diarize(path: str, num_speakers: int | None = None) -> list[SpeakerTurn]:
     """Speaker turns for *path*; downloads models on first ever use."""
     pipeline = _load_pipeline()
     try:  # keep diarization on the same GPU as Whisper when there is one
@@ -136,14 +135,14 @@ def _torch_cuda() -> bool:
         return False
 
 
-def assign_speakers(words: List[Word], turns: List[SpeakerTurn]) -> List[Word]:
+def assign_speakers(words: list[Word], turns: list[SpeakerTurn]) -> list[Word]:
     """Give each word the label of the speaker covering most of it.
 
     A word falling in a gap between turns (pyannote boundaries never align
     perfectly with word ends) gets the nearest turn's label — a word sits
     next to the speaker who was speaking around it, never unassigned.
     """
-    out: List[Word] = []
+    out: list[Word] = []
     for w in words:
         best_label, best_overlap = None, 0.0
         for t in turns:
@@ -162,10 +161,10 @@ def assign_speakers(words: List[Word], turns: List[SpeakerTurn]) -> List[Word]:
     return out
 
 
-def _blocks_with_speakers(words: List[Word]) -> List[Block]:
+def _blocks_with_speakers(words: list[Word]) -> list[Block]:
     """Segment into blocks, never mixing two speakers in one caption block."""
-    blocks: List[Block] = []
-    run: List[Word] = []
+    blocks: list[Block] = []
+    run: list[Word] = []
     for w in words:
         if run and getattr(run[-1], "speaker", None) != getattr(w, "speaker", None):
             blocks.extend(segment_words(run))
@@ -176,7 +175,7 @@ def _blocks_with_speakers(words: List[Word]) -> List[Block]:
     return blocks
 
 
-def speaker_blocks(words: List[Word], turns: List[SpeakerTurn]) -> List[Block]:
+def speaker_blocks(words: list[Word], turns: list[SpeakerTurn]) -> list[Block]:
     """Diarized caption blocks: split on speakers, then on time/length."""
     return _blocks_with_speakers(assign_speakers(words, turns))
 

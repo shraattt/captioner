@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
 
 import numpy as np
 
@@ -42,15 +43,13 @@ DUPLICATE_TOLERANCE = 0.7  # same word re-seen within this window = duplicate
 AudioCallback = Callable[[np.ndarray], None]  # float32 mono frames
 
 
-# --------------------------------------------------------------------------
 # devices
-# --------------------------------------------------------------------------
 
-def list_input_devices() -> List[dict]:
+def list_input_devices() -> list[dict]:
     """Microphones plus every output device's loopback (system audio)."""
     import soundcard as sc
 
-    devices: List[dict] = []
+    devices: list[dict] = []
     for mic in sc.all_microphones(include_loopback=False):
         devices.append({"id": mic.id, "name": mic.name, "kind": "mic", "is_loopback": False})
     for spk in sc.all_speakers():
@@ -65,9 +64,7 @@ def list_input_devices() -> List[dict]:
     return devices
 
 
-# --------------------------------------------------------------------------
 # capture
-# --------------------------------------------------------------------------
 
 class MicCapture(threading.Thread):
     """Record a device into a fixed ring buffer on a background thread.
@@ -77,7 +74,7 @@ class MicCapture(threading.Thread):
     """
 
     def __init__(self, device_id: str, ring_seconds: float = 60.0,
-                 blocksize_ms: float = 100.0, on_error: Optional[Callable[[str], None]] = None):
+                 blocksize_ms: float = 100.0, on_error: Callable[[str], None] | None = None):
         super().__init__(daemon=True, name="live-capture")
         self.device_id = device_id
         self.on_error = on_error
@@ -89,7 +86,7 @@ class MicCapture(threading.Thread):
         self._stop = threading.Event()
         self._blocksize = max(1, int(blocksize_ms * SAMPLE_RATE / 1000))
 
-    # ring accounting -------------------------------------------------------
+    # ring accounting
     @property
     def total_frames(self) -> int:
         with self._lock:
@@ -114,7 +111,7 @@ class MicCapture(threading.Thread):
                 out = np.concatenate([self.ring[start:], self.ring[:take - (len(self.ring) - start)]])
         return out
 
-    # thread ----------------------------------------------------------------
+    # thread
     def run(self) -> None:
         import soundcard as sc
 
@@ -168,9 +165,7 @@ class MicCapture(threading.Thread):
                 self._level = float(np.sqrt(np.mean(np.square(mono))))
 
 
-# --------------------------------------------------------------------------
 # stabilized live text
-# --------------------------------------------------------------------------
 
 @dataclass
 class LiveState:
@@ -178,15 +173,102 @@ class LiveState:
     committed: str = ""
     partial: str = ""
     full_text: str = ""  # every frozen word since the session started (uncapped)
-    full_words: List[tuple] = field(default_factory=list)  # (start, end, text) seconds
+    full_words: list[tuple] = field(default_factory=list)  # (start, end, text) seconds
     level: float = 0.0   # input RMS 0..~1, for the overlay's level meter
-    segments: List[dict] = field(default_factory=list)
+    segments: list[dict] = field(default_factory=list)
+    # Translation of the last committed sentence, plus the session's
+    # (source, translation) pairs in order. Empty when translation is off.
+    translation: str = ""
+    translated_pairs: list[tuple] = field(default_factory=list)
 
     @property
     def text(self) -> str:
         if self.committed and self.partial:
             return f"{self.committed} {self.partial}".strip()
         return (self.committed or self.partial).strip()
+
+
+class TranslationRunner:
+    """Translates finished sentences on a background thread.
+
+    Live captions cannot wait for a translation model: a 418M-parameter batch
+    takes longer than the next decode window. So finished sentences are handed
+    over through a queue and the audio loop never blocks on them, and only
+    *sentences* are translated - translating the unstable tail would both waste
+    work and churn the display.
+
+    A backend that cannot be built (weights missing, API key absent) is
+    reported once through ``on_error`` and then disabled, so a session keeps
+    captioning in the source language instead of failing.
+    """
+
+    def __init__(self, target: str, translator=None, on_error=None,
+                 poll_seconds: float = 0.2):
+        self.target = target
+        self._translator = translator
+        self._on_error = on_error
+        self._poll = float(poll_seconds)
+        self._queue: queue.Queue[str] = queue.Queue()
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._pairs: list[tuple] = []
+        self._latest = ""
+        self._disabled = False
+        self._thread = threading.Thread(
+            target=self._run, name="live-translation", daemon=True
+        )
+        self._thread.start()
+
+    def submit(self, sentence: str) -> None:
+        """Queue one finished sentence (no-op once disabled)."""
+        text = sentence.strip()
+        if not text or self._disabled:
+            return
+        self._queue.put(text)
+
+    def snapshot(self) -> tuple:
+        """``(latest translation, [(source, translation), ...])``."""
+        with self._lock:
+            return self._latest, list(self._pairs)
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2.0)
+
+    def _backend(self):
+        if self._translator is None:
+            from .engines import mt
+
+            self._translator = mt()
+        return self._translator
+
+    def _disable(self, message: str) -> None:
+        self._disabled = True
+        logger.warning("live translation disabled: %s", message)
+        if self._on_error is not None:
+            self._on_error(message)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                sentence = self._queue.get(timeout=self._poll)
+            except queue.Empty:
+                continue
+            if sentence is None:
+                break
+            try:
+                translator = self._backend()
+                available, why = getattr(translator, "available", lambda: (True, ""))()
+                if not available:
+                    self._disable(f"translation unavailable: {why}")
+                    continue
+                translated = translator.translate_many([sentence], self.target)[0]
+            except Exception as exc:  # noqa: BLE001 - a session must survive this
+                self._disable(f"translation failed: {type(exc).__name__}: {exc}")
+                continue
+            with self._lock:
+                self._latest = str(translated).strip()
+                self._pairs.append((sentence, self._latest))
 
 
 class LiveEngine:
@@ -211,26 +293,35 @@ class LiveEngine:
     # a re-proposal (timestamps drifted past the per-word tolerance), not
     # someone genuinely saying the same 3+ words again.
     REPEAT_RUN_WORDS = 3
-    # --- per-session calibration (calibrate) --------------------------------
+    #per-session calibration (calibrate)
     GATE_FLOOR_MULTIPLIER = 2.5  # gate sits this far above the noise floor
     GATE_MAX_RMS = 0.03          # never gate above this: real speech must pass
     NOISY_FLOOR_RMS = 0.01       # above this, tighten the confidence filter too
 
-    def __init__(self, model_size: Optional[str] = None, beam_size: int = 1,
-                 window_seconds: float = WINDOW_SECONDS):
+    def __init__(self, model_size: str | None = None, beam_size: int = 1,
+                 window_seconds: float = WINDOW_SECONDS,
+                 translate_to: str | None = None, translator=None,
+                 on_translation_error: Callable[[str], None] | None = None):
         self.model_size = model_size or config.LIVE_MODEL_SIZE
         self.beam_size = int(beam_size)
         self.window_seconds = float(window_seconds)
+        self.translate_to = (translate_to or config.LIVE_TRANSLATE_TO or "").strip()
+        self._translation: TranslationRunner | None = None
+        if self.translate_to:
+            self._translation = TranslationRunner(
+                self.translate_to, translator=translator,
+                on_error=on_translation_error,
+            )
         self.state = LiveState()
         self.last_window_rms: float = 1.0   # decays only via measurements
         self.suggested_stride: float = STRIDE_SECONDS
-        self._full: List[str] = []         # every frozen word, uncapped (text only)
-        self._full_words: List[tuple] = []  # frozen (start, end, text), seconds
+        self._full: list[str] = []         # every frozen word, uncapped (text only)
+        self._full_words: list[tuple] = []  # frozen (start, end, text), seconds
         self._frontier: float = 0.0        # absolute ring-seconds: words starting before this freeze
-        self._frozen_recent: List[tuple] = []  # (abs_start, norm_text) for dup matching
+        self._frozen_recent: list[tuple] = []  # (abs_start, norm_text) for dup matching
         self._speech_recently = True   # decode until proven silent
-        self._silence_since: Optional[float] = None
-        self._sentence_buffer: List[tuple] = []  # frozen words awaiting a sentence end
+        self._silence_since: float | None = None
+        self._sentence_buffer: list[tuple] = []  # frozen words awaiting a sentence end
         # Per-session calibration (see calibrate); start from safe defaults.
         self.silence_rms: float = SILENCE_RMS
         self.min_logprob: float = self.MIN_SEGMENT_LOGPROB
@@ -238,10 +329,23 @@ class LiveEngine:
         self._device = transcribe.resolve_device()
         self._compute = transcribe.resolve_compute_type(self._device)
 
-    def _append_committed(self, texts: List[str]) -> None:
+    def _append_committed(self, texts: list[str]) -> None:
         """Append words to the frozen text, keeping it bounded."""
         committed = (self.state.committed + " " + " ".join(texts)).strip()
         self.state.committed = committed[-self.COMMITTED_KEEP_CHARS:]
+
+    def _sync_translation(self) -> None:
+        """Copy the translation worker's progress into the state the UI reads."""
+        if self._translation is None:
+            return
+        latest, pairs = self._translation.snapshot()
+        self.state.translation = latest
+        self.state.translated_pairs = pairs
+
+    def close(self) -> None:
+        """Stop background work (the translation thread) at session end."""
+        if self._translation is not None:
+            self._translation.stop()
 
     @staticmethod
     def _ends_sentence(text: str) -> bool:
@@ -265,6 +369,9 @@ class LiveEngine:
                 return
         self._append_committed(texts)
         self._sentence_buffer.clear()
+        # A finished sentence is the unit live translation works on.
+        if self._translation is not None:
+            self._translation.submit(" ".join(texts))
 
     @staticmethod
     def _norm(text: str) -> str:
@@ -289,7 +396,7 @@ class LiveEngine:
                 return True
         return False
 
-    def _strip_repeat_run(self, fresh: List[tuple]) -> List[tuple]:
+    def _strip_repeat_run(self, fresh: list[tuple]) -> list[tuple]:
         """Drop runs that exactly repeat the frozen tail, at any position.
 
         On real TV/mic audio, word timestamps drift well past the per-word
@@ -304,7 +411,7 @@ class LiveEngine:
             return fresh
         frozen_texts = [t for _s, t in self._frozen_recent]
         fresh_texts = [self._norm(t) for _s, _e, t in fresh]
-        keep: List[tuple] = []
+        keep: list[tuple] = []
         i = 0
         while i < len(fresh):
             matched = False
@@ -319,7 +426,7 @@ class LiveEngine:
                 i += 1
         return keep
 
-    def _freeze(self, words: List[tuple], frontier: float) -> List[tuple]:
+    def _freeze(self, words: list[tuple], frontier: float) -> list[tuple]:
         """Return the not-yet-frozen words starting before *frontier*, and mark them frozen."""
         fresh = [w for w in words if w[0] < frontier and not self._is_dup(w)]
         fresh = self._strip_repeat_run(fresh)
@@ -350,7 +457,7 @@ class LiveEngine:
         # Silence gate: decode only when speech energy is present anywhere
         # in the window. Whisper hallucinates fluent filler on near-silence
         # ("Thank you for watching."), and the commit step would freeze it
-        # — never decoding a silent window removes the whole failure class.
+        # - never decoding a silent window removes the whole failure class.
         if rms < self.silence_rms and not self._speech_recently:
             return self.state
         if rms >= self.silence_rms:
@@ -372,12 +479,12 @@ class LiveEngine:
             condition_on_previous_text=False,  # each window stands alone
             beam_size=self.beam_size,  # beam 1 measured as accurate as beam 5
         )
-        words: List[tuple] = []
+        words: list[tuple] = []
         for seg in segments:
             # Whisper hallucination filters: on silence/music/noise the model
-            # emits fluent filler. A segment this unsure — or one Whisper
+            # emits fluent filler. A segment this unsure - or one Whisper
             # itself flags as likely-not-speech (music on TV, room noise on
-            # a mic) — is almost never speech the user actually said.
+            # a mic) - is almost never speech the user actually said.
             if seg.avg_logprob is not None and seg.avg_logprob < self.min_logprob:
                 logger.debug("dropped low-confidence segment (%.2f): %r",
                              seg.avg_logprob, seg.text)
@@ -423,6 +530,7 @@ class LiveEngine:
         self.state.segments = [
             {"start": s, "end": e, "text": t} for s, e, t in words[-60:]
         ]
+        self._sync_translation()
         return self.state
 
     def calibrate(self, capture: MicCapture, seconds: float = 2.0) -> dict:
@@ -440,7 +548,7 @@ class LiveEngine:
         speech). On a noisy mic, the confidence filter also tightens: a
         hissy signal makes hallucinations more likely at any given energy.
         """
-        levels: List[float] = []
+        levels: list[float] = []
         block = max(1, int(0.05 * SAMPLE_RATE))
         n_blocks = max(1, int(seconds * SAMPLE_RATE / block))
         for _ in range(n_blocks):
@@ -487,7 +595,7 @@ class LiveEngine:
                 if w.word.strip():
                     words.append((window_start_t + w.start, window_start_t + w.end, w.word.strip()))
         # freeze everything seen in this window (dedup keeps repeats out);
-        # end of session — commit the sentence buffer too, nothing stays pending
+        # end of session - commit the sentence buffer too, nothing stays pending
         fresh = [w for w in words if not self._is_dup(w)]
         for w in fresh:
             self._frozen_recent.append((w[0], self._norm(w[2])))
@@ -500,10 +608,11 @@ class LiveEngine:
         self.state.full_words = list(self._full_words)
         self.state.partial = ""
         self.state.level = float(getattr(capture, "level", 0.0) or 0.0)
+        self._sync_translation()
         return self.state
 
-    # -- file streaming (test/demo path) -------------------------------------
-    def stream_file(self, path: str, on_update: Optional[Callable[[LiveState], None]] = None,
+    # -- file streaming (test/demo path)
+    def stream_file(self, path: str, on_update: Callable[[LiveState], None] | None = None,
                     speed: float = 0.0) -> LiveState:
         """Feed a real file through the live pipeline as if it were a device.
 
@@ -540,7 +649,7 @@ class LiveEngine:
         return self.state
 
 
-def decode_ring_once(ring: np.ndarray, model_size: Optional[str] = None) -> List[dict]:
+def decode_ring_once(ring: np.ndarray, model_size: str | None = None) -> list[dict]:
     """One-shot helper for tests: transcribe a plain float32 array."""
     engine = LiveEngine(model_size=model_size or "tiny.en")
     fake = MicCapture(device_id="unused")
@@ -549,11 +658,9 @@ def decode_ring_once(ring: np.ndarray, model_size: Optional[str] = None) -> List
     return engine.state.segments
 
 
-# ---------------------------------------------------------------------------
-# transcript export — the same segmentation + writers the batch jobs use
-# ---------------------------------------------------------------------------
+# transcript export - the same segmentation + writers the batch jobs use
 
-def _session_blocks(full_words: List[tuple]) -> List[Block]:
+def _session_blocks(full_words: list[tuple]) -> list[Block]:
     """Group a live session's frozen words into caption blocks."""
     words = [
         Word(text=text, start=start, end=end)
@@ -563,17 +670,17 @@ def _session_blocks(full_words: List[tuple]) -> List[Block]:
     return segment_words(words)
 
 
-def transcript_to_srt(full_words: List[tuple]) -> str:
+def transcript_to_srt(full_words: list[tuple]) -> str:
     """A live session as a standard .srt (grouped like batch captions)."""
     return srt.to_srt(_session_blocks(full_words))
 
 
-def transcript_to_vtt(full_words: List[tuple]) -> str:
+def transcript_to_vtt(full_words: list[tuple]) -> str:
     """A live session as a standard .vtt."""
     return srt.to_vtt(_session_blocks(full_words))
 
 
-def save_transcript(full_words: List[tuple], path: str) -> str:
+def save_transcript(full_words: list[tuple], path: str) -> str:
     """Write a live transcript; the extension picks the format.
 
     ``.srt`` and ``.vtt`` get real grouped, timed captions identical in style

@@ -15,7 +15,7 @@ import pytest
 pytest.importorskip("PySide6.QtWidgets")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from ui.hotkey import MOD_ALT, MOD_CONTROL, GlobalHotkey, VK_L  # noqa: E402
+from ui.hotkey import MOD_ALT, MOD_CONTROL, VK_L, GlobalHotkey  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -139,9 +139,7 @@ def test_hotkey_stop_without_start_is_safe(qapp):
     assert hk._thread is None
 
 
-# ---------------------------------------------------------------------------
 # dashboard wiring (fakes; no real device or model)
-# ---------------------------------------------------------------------------
 
 class FakeWorker:
     def __init__(self, device_id):

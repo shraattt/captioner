@@ -14,13 +14,13 @@ from captioner import config
 _ROOT = Path(config.__file__).resolve().parents[1]
 from captioner.live import (
     COMMIT_MARGIN,
-    MicCapture,
-    LiveEngine,
-    LiveState,
     SAMPLE_RATE,
     SILENCE_RMS,
     STRIDE_SECONDS,
     WINDOW_SECONDS,
+    LiveEngine,
+    LiveState,
+    MicCapture,
 )
 
 SR = SAMPLE_RATE
@@ -31,9 +31,7 @@ def tone(seconds: float, freq: float = 220.0) -> np.ndarray:
     return (0.3 * np.sin(2 * np.pi * freq * t)).astype(np.float32)
 
 
-# ---------------------------------------------------------------------------
 # ring buffer
-# ---------------------------------------------------------------------------
 
 def test_ring_read_tail_returns_newest_frames_in_order():
     cap = MicCapture(device_id="unused")
@@ -67,9 +65,7 @@ def test_read_tail_copies_are_independent():
     assert cap.read_tail(1.0)[0] == 1.0
 
 
-# ---------------------------------------------------------------------------
 # engine: window bookkeeping (no model needed)
-# ---------------------------------------------------------------------------
 
 def test_engine_skips_decode_until_audible():
     engine = LiveEngine(model_size="tiny.en")
@@ -210,9 +206,7 @@ def test_commit_guard_skips_identical_sentence():
     assert e.state.committed == "Hello there friend."
 
 
-# ---------------------------------------------------------------------------
 # per-session noise-floor calibration
-# ---------------------------------------------------------------------------
 
 class _AmbientCap:
     """Fake capture whose ambient level is settable; used for calibration."""
@@ -241,7 +235,7 @@ def test_calibration_raises_gate_on_hot_mic():
 def test_calibration_keeps_default_on_quiet_mic():
     """A quiet mic must not get a gate below the safe default."""
     e = LiveEngine(model_size="tiny.en")
-    result = e.calibrate(_AmbientCap(rms=0.001), seconds=0.5)
+    e.calibrate(_AmbientCap(rms=0.001), seconds=0.5)
     assert e.silence_rms == pytest.approx(SILENCE_RMS)  # clamped up to default
     assert e.min_logprob == pytest.approx(LiveEngine.MIN_SEGMENT_LOGPROB)
 
@@ -254,7 +248,6 @@ def test_calibration_tightens_confidence_on_noisy_mic():
 
 def test_calibration_floor_ignores_speech_spikes():
     """The 25th-percentile floor ignores occasional loud blocks."""
-    e = LiveEngine(model_size="tiny.en")
     levels = [0.002] * 18 + [0.2] * 2  # mostly quiet, two loud spikes
     floor = float(np.percentile(sorted(levels), 25))
     assert floor == pytest.approx(0.002)  # spikes did not poison the floor
@@ -276,9 +269,7 @@ def test_live_state_text_joins_committed_and_partial():
     assert LiveState().text == ""
 
 
-# ---------------------------------------------------------------------------
 # transcript export (live SRT/VTT)
-# ---------------------------------------------------------------------------
 
 WORDS = [
     (0.0, 0.4, "Hello"), (0.45, 0.9, "and"), (0.95, 1.4, "welcome."),
@@ -327,9 +318,7 @@ def test_transcript_export_skips_bad_words():
     assert "backwards" not in text  # end < start is dropped, not fatal
 
 
-# ---------------------------------------------------------------------------
 # full decode path on real speech (tiny.en, no hardware)
-# ---------------------------------------------------------------------------
 
 @pytest.fixture()
 def smoke_audio():

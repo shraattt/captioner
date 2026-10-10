@@ -83,7 +83,7 @@ def test_progress_falls_back_to_model_default(monkeypatch):
     assert seen["model_size"] == config.BATCH_MODEL_SIZE
 
 
-# --- model references (Phase 5: fine-tuned local checkpoints) --------------
+#model references (Phase 5: fine-tuned local checkpoints)
 def test_size_names_map_to_their_repos():
     assert transcribe.model_ref("tiny.en") == "Systran/faster-whisper-tiny.en"
     assert transcribe.model_ref("distil-large-v3") == "Systran/faster-distil-whisper-large-v3"
