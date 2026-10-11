@@ -69,6 +69,17 @@ def call(base, path, method="GET", body=None, token=None, headers=None):
         return status, content_type, raw
 
 
+def call_raw(base, path, method="GET"):
+    """Like ``call``, but for binary bodies: returns (status, type, bytes)."""
+    request = urllib.request.Request(base + path, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return (response.status, response.headers.get("Content-Type", ""),
+                    response.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.headers.get("Content-Type", ""), exc.read()
+
+
 def make_media(tmp_path, name="clip.mp4"):
     path = tmp_path / name
     path.write_bytes(b"media")
@@ -105,6 +116,19 @@ def test_ui_assets_are_served_with_their_types(server):
     assert status == 200 and "javascript" in content_type
     status, content_type, _body = call(base, "/static/style.css")
     assert status == 200 and content_type.startswith("text/css")
+
+
+def test_the_page_links_a_favicon_and_it_is_the_app_icon(server):
+    """The tab icon is captioner.ico itself, served without a second copy."""
+    _httpd, base = server
+    _status, _type, body = call(base, "/")
+    assert 'href="/favicon.ico"' in body
+
+    status, content_type, icon = call_raw(base, "/favicon.ico")
+    assert status == 200
+    assert content_type == "image/x-icon"
+    assert icon.startswith(b"\x00\x00\x01\x00")  # the ICO magic number
+    assert icon == (config.PROJECT_ROOT / "captioner.ico").read_bytes()
 
 
 def test_ui_assets_cannot_escape_their_folder(server):

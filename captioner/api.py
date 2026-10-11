@@ -9,6 +9,7 @@ run the captioner can serve this, with nothing installed.
 Routes (all JSON unless noted):
 
     GET    /                          the browser UI (static page)
+    GET    /favicon.ico               the app icon, for the browser tab
     GET    /openapi.json              OpenAPI 3.0 description of this API
     GET    /api/health                version, queue counts, selected engines
     GET    /api/engines               registered backends and whether they work
@@ -63,6 +64,9 @@ DRAIN_LIMIT = 8 * MAX_BODY_BYTES
 DEFAULT_JOB_LIMIT = 200
 
 WEB_ROOT = Path(__file__).resolve().parent.parent / "ui" / "web"
+# The app icon doubles as the browser favicon, so the tab is branded without
+# committing a second copy of a binary to the repository.
+ICON_PATH = config.PROJECT_ROOT / "captioner.ico"
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "0:0:0:0:0:0:0:1"}
 
@@ -440,6 +444,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             if path == "/" or path.startswith("/static/"):
                 self._send_asset(path)
                 return
+            if path == "/favicon.ico":
+                self._send_icon()
+                return
             if path == "/openapi.json":
                 self._send_json(200, openapi_spec())
                 return
@@ -525,6 +532,19 @@ class ApiHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _send_icon(self) -> None:
+        """Serve captioner.ico, which the page links as its favicon."""
+        if not ICON_PATH.is_file():
+            raise ApiError(404, "no icon in this install")
+        body = ICON_PATH.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "image/x-icon")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()

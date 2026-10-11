@@ -4,6 +4,23 @@ Versions follow the phases the project was built in. Numbers in the tables are
 measured on the development machine (RTX 4050 laptop, 6 GB VRAM, i5-12450HX,
 16 GB RAM) — they are floors for a real lecturer's audio, not promises.
 
+## Unreleased
+
+### Changed
+- **A new app icon.** `scripts/make_icon.py` now draws the mark at every size it
+  ships (16, 20, 24, 32, 40, 48, 64, 128, 256) instead of embedding one 256px
+  image for Windows to blur down to the size it actually draws, and it takes
+  its colors from `ui/dashboard/theme.py`, so the icon is violet like the app
+  rather than the green it had been. Detail is dropped as the size falls: the
+  waveform goes below 48px and 16-24px is a plain violet tile with two text
+  lines, because the full mark is mush that small.
+
+### Added
+- **The browser UI has a favicon.** `GET /favicon.ico` serves `captioner.ico`
+  itself, so the tab is branded without a second copy of the binary in the tree.
+- `pillow` in `requirements-dev.txt`: the icon script uses it to assemble the
+  multi-size `.ico` (nothing at runtime depends on it).
+
 ## 0.7.0 — Phase 6: reach (engines, HTTP API, automation, live translation)
 
 ### Added

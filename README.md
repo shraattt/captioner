@@ -605,7 +605,7 @@ sessions — no leaks), `stress_mixed.py` (batch + live sharing the GPU),
 .venv\Scripts\python -m pytest
 ```
 
-325 tests covering segmentation, subtitle writers, the caption editor,
+326 tests covering segmentation, subtitle writers, the caption editor,
 diarization, alignment, translation, the engine registry and both API backends,
 the HTTP API (routing, status codes, token auth, cross-origin writes, path
 traversal, queueing end to end), the watch scanner and webhook delivery against a

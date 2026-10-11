@@ -2,3 +2,6 @@
 # because that file's install order is deliberate (torch from the CUDA index
 # first, then everything else).
 ruff>=0.6,<1.0
+
+# scripts/make_icon.py assembles the multi-size captioner.ico with Pillow.
+pillow>=10.0
