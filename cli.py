@@ -5,6 +5,7 @@ Lets you drive the whole pipeline without a GUI:
   python cli.py status            show jobs
   python cli.py run-once          process one queued job
   python cli.py work              poll the queue forever (the worker process)
+  python cli.py cancel <job_id>   stop a queued or running job
   python cli.py retry <job_id>    requeue a failed job
   python cli.py translate <job>   add subtitles in another language
   python cli.py languages         list translation targets
@@ -46,8 +47,8 @@ def cmd_add(args, conn) -> int:
 
 def cmd_status(args, conn) -> int:
     rows = conn.execute(
-        "SELECT id, file_name, status, error, created_at, finished_at "
-        "FROM jobs ORDER BY id"
+        "SELECT id, file_name, status, error, created_at, finished_at, "
+        "cancel_requested FROM jobs ORDER BY id"
     ).fetchall()
     if not rows:
         print("no jobs yet - add one with: python cli.py add <file>")
@@ -57,6 +58,9 @@ def cmd_status(args, conn) -> int:
         line = f"#{r['id']:<4} {r['status']:<8} {r['file_name']:<{width}}"
         if r["error"]:
             line += f"  ({r['error']})"
+        if r["cancel_requested"]:
+            # A running job only notices at the next segment boundary.
+            line += "  (stopping)"
         print(line)
     return 0
 
@@ -73,6 +77,25 @@ def cmd_work(args, conn) -> int:
         worker.run_forever(conn)
     except KeyboardInterrupt:
         print("\nworker stopped")
+    return 0
+
+
+def cmd_cancel(args, conn) -> int:
+    """Call off a queued job, or ask a running one to stop at the next boundary."""
+    row = conn.execute(
+        "SELECT id, status FROM jobs WHERE id = ?", (args.job_id,)
+    ).fetchone()
+    if row is None:
+        print(f"error: no job #{args.job_id}")
+        return 1
+    outcome = worker.request_cancel(conn, args.job_id)
+    if outcome is None:
+        print(f"job #{row['id']} is already {row['status']} - nothing to stop")
+        return 0
+    if outcome == "canceled":
+        print(f"job #{row['id']} canceled before it started")
+    else:
+        print(f"job #{row['id']} will stop at the next segment boundary")
     return 0
 
 
@@ -180,6 +203,10 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("work", help="run the worker loop (polls forever)")
     p.set_defaults(func=cmd_work)
+
+    p = sub.add_parser("cancel", help="stop a queued job, or a running one")
+    p.add_argument("job_id", type=int)
+    p.set_defaults(func=cmd_cancel)
 
     p = sub.add_parser("retry", help="requeue a failed/finished job")
     p.add_argument("job_id", type=int)

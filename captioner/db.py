@@ -28,6 +28,9 @@ OPTIONAL_JOB_COLUMNS = (
     ("diarize", "INTEGER NOT NULL DEFAULT 0"),
     ("align", "INTEGER NOT NULL DEFAULT 0"),
     ("translate_to", "TEXT"),
+    # Set by any client (API, CLI, dashboard) to ask for a stop; the worker
+    # running the job polls it, so the request crosses process boundaries.
+    ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 SCHEMA = """
@@ -48,7 +51,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at   TEXT,
     diarize       INTEGER NOT NULL DEFAULT 0,
     align         INTEGER NOT NULL DEFAULT 0,
-    translate_to  TEXT
+    translate_to  TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS captions (

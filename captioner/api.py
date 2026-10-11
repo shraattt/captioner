@@ -10,6 +10,7 @@ Routes (all JSON unless noted):
 
     GET    /                          the browser UI (static page)
     GET    /favicon.ico               the app icon, for the browser tab
+    GET    /api/events                queue changes as server-sent events
     GET    /openapi.json              OpenAPI 3.0 description of this API
     GET    /api/health                version, queue counts, selected engines
     GET    /api/engines               registered backends and whether they work
@@ -19,6 +20,7 @@ Routes (all JSON unless noted):
     POST   /api/jobs                  queue a file
     GET    /api/jobs/{id}             one job, with its caption blocks
     GET    /api/jobs/{id}/captions    captions as json, srt, vtt or text
+    POST   /api/jobs/{id}/cancel      stop a queued or running job
     POST   /api/jobs/{id}/retry       requeue a settled job
     DELETE /api/jobs/{id}             remove a job and its caption rows
     POST   /api/jobs/{id}/translate   write captions.<lang>.srt/.vtt
@@ -38,6 +40,7 @@ import logging
 import os
 import re
 import threading
+import time
 import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -58,6 +61,14 @@ DEFAULT_PORT = 8765
 HOST_ENV = "CAPTIONER_API_HOST"
 PORT_ENV = "CAPTIONER_API_PORT"
 TOKEN_ENV = "CAPTIONER_API_TOKEN"
+# Server-sent events. The page used to re-read five endpoints every two
+# seconds; now it opens one stream and is told when something changes. The
+# stream is deliberately bounded and then closed, because a local tool must not
+# accumulate request threads that never end - a browser reconnects on its own.
+SSE_POLL_SECONDS = 0.5
+SSE_HEARTBEAT_SECONDS = 10.0
+SSE_MAX_SECONDS = 300.0
+
 MAX_BODY_BYTES = 64 * 1024
 # A body this much larger than the limit is not worth reading out.
 DRAIN_LIMIT = 8 * MAX_BODY_BYTES
@@ -162,6 +173,7 @@ def _job_dict(row, conn=None) -> dict:
         "error": row["error"],
         "progress": row["progress"],
         "stage": row["stage"],
+        "cancel_requested": bool(row["cancel_requested"]),
         "created_at": row["created_at"],
         "started_at": row["started_at"] if "started_at" in keys else None,
         "finished_at": row["finished_at"],
@@ -203,6 +215,33 @@ def _caption_rows(conn, job_id: int) -> list[dict]:
 
 
 #route handlers
+
+def queue_snapshot(conn) -> dict:
+    """A small, cheap view of the queue: enough to notice any change.
+
+    Deliberately not the job list. Sending every job on every tick would move
+    far more data than the answer needs, and a snapshot that changes whenever
+    anything visible does lets the client decide when to refetch.
+    """
+    counts = {
+        row["status"]: row["n"]
+        for row in conn.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status")
+    }
+    running = [
+        {
+            "id": row["id"],
+            "progress": row["progress"],
+            "stage": row["stage"],
+            "cancel_requested": bool(row["cancel_requested"]),
+        }
+        for row in conn.execute(
+            "SELECT id, progress, stage, cancel_requested FROM jobs "
+            "WHERE status = 'running' ORDER BY id"
+        )
+    ]
+    newest = conn.execute("SELECT COALESCE(MAX(id), 0) FROM jobs").fetchone()[0]
+    return {"counts": counts, "running": running, "newest": newest}
+
 
 def h_health(request: Request) -> tuple[int, object]:
     counts = {
@@ -318,6 +357,26 @@ def h_job_captions(request: Request) -> tuple[int, object]:
     return 200, {"captions": blocks, "format": "json", "job_id": job_id}
 
 
+def h_job_cancel(request: Request) -> tuple[int, object]:
+    """Stop a job: 200 if it never started, 202 if a worker must wind down.
+
+    A queued job is called off outright. A running one is asked to stop through
+    the ``cancel_requested`` column, which the worker holding it polls between
+    segments -- so this works even when that worker is a different process
+    (``run_worker.bat``) with no way to receive a signal from here.
+    """
+    job_id = request.job_id()
+    status = _fetch_job(request.conn, job_id)["status"]
+    outcome = worker.request_cancel(request.conn, job_id)
+    if outcome is None:
+        raise ApiError(409, f"job #{job_id} is already {status}")
+    row = _fetch_job(request.conn, job_id)
+    return (202 if outcome == "requested" else 200), {
+        "job": _job_dict(row, request.conn),
+        "cancel": outcome,
+    }
+
+
 def h_job_retry(request: Request) -> tuple[int, object]:
     job_id = request.job_id()
     row = _fetch_job(request.conn, job_id)
@@ -367,6 +426,8 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", "/api/jobs/{job_id}", "one job with its caption blocks", h_job_detail),
     Route("GET", "/api/jobs/{job_id}/captions", "captions as json, srt, vtt or text",
           h_job_captions),
+    Route("POST", "/api/jobs/{job_id}/cancel", "stop a queued or running job",
+          h_job_cancel),
     Route("POST", "/api/jobs/{job_id}/retry", "requeue a settled job", h_job_retry),
     Route("DELETE", "/api/jobs/{job_id}", "remove a job and its captions", h_job_delete),
     Route("POST", "/api/jobs/{job_id}/translate", "write translated caption files",
@@ -446,6 +507,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             if path == "/favicon.ico":
                 self._send_icon()
+                return
+            if path == "/api/events":
+                self._send_events()
                 return
             if path == "/openapi.json":
                 self._send_json(200, openapi_spec())
@@ -528,12 +592,30 @@ class ApiHandler(BaseHTTPRequestHandler):
             remaining -= len(chunk)
 
     #responses
+    def _harden(self, page: bool = False) -> None:
+        """Headers that keep the browser from second-guessing the response.
+
+        Everything here is served from a loopback origin that can queue local
+        files, so a sniffed content type or a leaked Referer is worth closing
+        off; the page itself is then limited to its own origin by the CSP.
+        """
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if page:
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'none'; script-src 'self'; style-src 'self'; "
+                "img-src 'self' data:; connect-src 'self'; base-uri 'none'; "
+                "form-action 'none'",
+            )
+
     def _send_json(self, status: int, payload: object) -> None:
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._harden()
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -547,6 +629,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "image/x-icon")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._harden()
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -567,8 +650,58 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", _content_type(target))
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._harden(page=target.suffix.lower() in {".html", ".htm"})
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_events(self) -> None:
+        """Stream queue changes until the client leaves or the budget runs out.
+
+        The bounded time is the point: a request thread must not live forever
+        in a local tool, so the stream ends, the browser reconnects, and no
+        thread can be orphaned by a client that vanished. One database
+        connection serves the whole stream instead of one per tick.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self._harden()
+        self.end_headers()
+        self.close_connection = True
+
+        conn = db.connect()
+        try:
+            deadline = time.monotonic() + SSE_MAX_SECONDS
+            last_beat = time.monotonic()
+            previous = None
+            while time.monotonic() < deadline:
+                payload = json.dumps(queue_snapshot(conn), sort_keys=True)
+                if payload != previous:
+                    previous = payload
+                    self._write_event(payload)
+                now = time.monotonic()
+                if now - last_beat >= SSE_HEARTBEAT_SECONDS:
+                    last_beat = now
+                    self._write_event(": keep-alive", comment=True)
+                time.sleep(SSE_POLL_SECONDS)
+            self._write_event("{\"bye\": true}", event="bye")
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                OSError):
+            return  # the client hung up; nothing to report or clean up
+        finally:
+            conn.close()
+
+    def _write_event(self, data: str, event: str | None = None,
+                     comment: bool = False) -> None:
+        """One server-sent-events frame, flushed so the client sees it now."""
+        if comment:
+            frame = f"{data}\n\n"
+        else:
+            prefix = f"event: {event}\n" if event else ""
+            frame = f"{prefix}data: {data}\n\n"
+        self.wfile.write(frame.encode("utf-8"))
+        self.wfile.flush()
 
 
 def _content_type(path: Path) -> str:
@@ -600,6 +733,18 @@ def openapi_spec() -> dict:
                 "schema": {"type": "string"},
             })
         paths.setdefault(route.path, {})[route.method.lower()] = operation
+    # Not a JSON route, so it is described by hand rather than generated.
+    paths["/api/events"] = {
+        "get": {
+            "summary": "queue changes as server-sent events",
+            "description": "Streams a snapshot whenever the queue changes and "
+                           "ends after a bounded time; clients reconnect.",
+            "responses": {"200": {
+                "description": "text/event-stream of queue snapshots",
+                "content": {"text/event-stream": {"schema": {"type": "string"}}},
+            }},
+        }
+    }
     return {
         "openapi": "3.0.3",
         "info": {

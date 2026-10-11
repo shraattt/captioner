@@ -147,6 +147,10 @@ def test_openapi_describes_every_route(server):
     assert "/api/jobs" in spec["paths"]
     assert set(spec["paths"]["/api/jobs"]) == {"get", "post"}
     assert "parameters" in spec["paths"]["/api/jobs/{job_id}"]["get"]
+    assert "post" in spec["paths"]["/api/jobs/{job_id}/cancel"]
+    # the stream is not a JSON route, so it is described by hand: check it is there
+    stream = spec["paths"]["/api/events"]["get"]
+    assert "text/event-stream" in stream["responses"]["200"]["content"]
 
 
 #read endpoints
@@ -373,6 +377,182 @@ def test_oversized_and_malformed_bodies(server):
     assert status == 413
     status, _type, payload = call(base, "/api/jobs", "POST", ["not", "an", "object"])
     assert status == 400 and "JSON object" in payload["error"]["message"]
+
+
+def headers_of(base, path):
+    """One request, returning the status and headers (as a plain dict)."""
+    request = urllib.request.Request(base + path)
+    with urllib.request.urlopen(request, timeout=15) as response:
+        return response.status, dict(response.headers)
+
+
+def read_event(stream, timeout=8.0):
+    """Read one server-sent-events frame, skipping comments and blank lines."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        line = stream.readline()
+        if not line:
+            return None  # the stream ended
+        text = line.decode("utf-8", "replace").strip()
+        if text.startswith("data: "):
+            return json.loads(text[len("data: "):])
+    return None
+
+
+#cancellation
+
+
+def test_cancel_stops_a_queued_job(server, data_paths):
+    _httpd, base = server
+    job_id = queue_job(data_paths, status="queued")
+    status, _type, payload = call(base, f"/api/jobs/{job_id}/cancel", "POST", {})
+
+    assert status == 200
+    assert payload["cancel"] == "canceled"
+    assert payload["job"]["status"] == "canceled"
+
+
+def test_cancel_asks_a_running_job_to_stop(server, data_paths):
+    """A running job keeps running here: its worker decides when to stop."""
+    _httpd, base = server
+    job_id = queue_job(data_paths, status="running")
+    status, _type, payload = call(base, f"/api/jobs/{job_id}/cancel", "POST", {})
+
+    assert status == 202
+    assert payload["cancel"] == "requested"
+    assert payload["job"]["status"] == "running"
+    assert payload["job"]["cancel_requested"] is True
+
+    # The flag is the whole mechanism, so check what a worker would poll.
+    conn = db.connect()
+    try:
+        assert worker.cancel_requested(conn, job_id) is True
+    finally:
+        conn.close()
+
+
+def test_cancel_refuses_a_settled_job(server, data_paths):
+    _httpd, base = server
+    job_id = queue_job(data_paths, status="done")
+    status, _type, payload = call(base, f"/api/jobs/{job_id}/cancel", "POST", {})
+    assert status == 409
+    assert "already done" in payload["error"]["message"]
+
+
+def test_cancel_needs_the_token_when_one_is_set(secured, data_paths):
+    _httpd, base = secured
+    job_id = queue_job(data_paths, status="queued")
+
+    status, _type, _payload = call(base, f"/api/jobs/{job_id}/cancel", "POST", {})
+    assert status == 401
+
+    status, _type, payload = call(base, f"/api/jobs/{job_id}/cancel", "POST", {},
+                                 token="hunter2")
+    assert status == 200 and payload["cancel"] == "canceled"
+
+
+def test_cancel_of_an_unknown_job_is_a_404(server):
+    _httpd, base = server
+    status, _type, payload = call(base, "/api/jobs/424242/cancel", "POST", {})
+    assert status == 404 and "424242" in payload["error"]["message"]
+
+
+#live updates
+
+
+def test_events_stream_tells_the_page_about_a_new_job(server, data_paths, monkeypatch):
+    """Instead of polling five endpoints every two seconds, the page is told."""
+    _httpd, base = server
+    monkeypatch.setattr(api, "SSE_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(api, "SSE_HEARTBEAT_SECONDS", 0.2)
+    monkeypatch.setattr(api, "SSE_MAX_SECONDS", 8.0)
+
+    with urllib.request.urlopen(base + "/api/events", timeout=15) as response:
+        assert response.status == 200
+        assert response.headers["Content-Type"].startswith("text/event-stream")
+
+        first = read_event(response)
+        assert first is not None and first["counts"] == {} and first["newest"] == 0
+
+        job_id = queue_job(data_paths)
+        seen = None
+        for _ in range(200):  # bounded: the change must arrive quickly
+            event = read_event(response)
+            if event and event.get("newest") == job_id:
+                seen = event
+                break
+        assert seen is not None, "the new job was never announced"
+        assert seen["counts"] == {"queued": 1}
+
+
+def test_events_stream_has_a_heartbeat_and_ends(server, monkeypatch):
+    """The stream is bounded, so no request thread can be orphaned."""
+    _httpd, base = server
+    monkeypatch.setattr(api, "SSE_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(api, "SSE_HEARTBEAT_SECONDS", 0.1)
+    monkeypatch.setattr(api, "SSE_MAX_SECONDS", 1.0)
+
+    saw_comment = saw_bye = False
+    with urllib.request.urlopen(base + "/api/events", timeout=15) as response:
+        for _ in range(400):
+            line = response.readline()
+            if not line:
+                break  # the server closed the stream
+            text = line.decode("utf-8", "replace").strip()
+            if text.startswith(":"):
+                saw_comment = True
+            if text == "event: bye":
+                saw_bye = True
+    assert saw_comment, "no keep-alive comment arrived"
+    assert saw_bye, "the stream did not say goodbye before closing"
+
+
+def test_events_stream_needs_the_token_when_one_is_set(secured, monkeypatch):
+    _httpd, base = secured
+    monkeypatch.setattr(api, "SSE_MAX_SECONDS", 1.0)
+    monkeypatch.setattr(api, "SSE_POLL_SECONDS", 0.05)
+    try:
+        urllib.request.urlopen(base + "/api/events", timeout=10)
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 401
+    else:  # pragma: no cover - a stream that leaked would hang the test
+        raise AssertionError("the stream was served without a token")
+
+
+def test_the_snapshot_reports_the_running_job_and_its_cancel_request(data_paths):
+    job_id = queue_job(data_paths, status="running")
+    conn = db.connect()
+    try:
+        worker.request_cancel(conn, job_id)
+        snapshot = api.queue_snapshot(conn)
+    finally:
+        conn.close()
+    assert snapshot["counts"] == {"running": 1}
+    assert snapshot["running"] == [
+        {"id": job_id, "progress": None, "stage": None, "cancel_requested": True}
+    ]
+
+
+#headers
+
+
+def test_the_page_is_served_with_a_content_security_policy(server):
+    _httpd, base = server
+    status, headers = headers_of(base, "/")
+    assert status == 200
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Referrer-Policy"] == "no-referrer"
+    policy = headers["Content-Security-Policy"]
+    assert "default-src 'none'" in policy
+    assert "connect-src 'self'" in policy and "form-action 'none'" in policy
+
+
+def test_json_and_assets_are_not_sniffed(server):
+    _httpd, base = server
+    for path in ("/api/health", "/static/style.css", "/static/app.js", "/favicon.ico"):
+        _status, headers = headers_of(base, path)
+        assert headers["X-Content-Type-Options"] == "nosniff", path
+        assert "Content-Security-Policy" not in headers, path  # documents only
 
 
 def test_the_watch_scan_helper_matches_the_scanner(data_paths):

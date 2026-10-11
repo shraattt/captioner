@@ -264,3 +264,39 @@ def test_options_default_to_off(make_win):
     assert win._queue_options() == {"diarize": False, "align": False, "translate_to": None}
     assert win.translate_combo.itemData(0) == ""  # "Off" is first
     assert win.translate_combo.count() > 1
+
+
+def test_cancel_asks_a_job_owned_by_another_process_to_stop(make_win, conn, tmp_path):
+    """The window can stop a worker it does not own (run_worker.bat, the CLI).
+
+    This used to be a dead end: the button told the user to go kill the other
+    process themselves. The request now travels through the database, which is
+    the only channel the two processes share.
+    """
+    job_id = seed_job(conn, tmp_path, status="running", captions=False)
+    win = make_win()
+    assert win.worker_thread is None or not win.worker_thread.isRunning()
+
+    assert win.cancel_running_job() is True
+    row = conn.execute(
+        "SELECT status, cancel_requested FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert row["status"] == "running"  # the owning worker decides when to stop
+    assert row["cancel_requested"] == 1
+    assert "another process" in win.statusBar().currentMessage()
+
+
+
+def test_the_table_says_a_running_job_is_stopping(make_win, conn, tmp_path):
+    seed_job(conn, tmp_path, status="running", captions=False)
+    win = make_win()
+    win.cancel_running_job()
+    win.refresh()
+    assert "stopping at the next boundary" in win.table.item(0, 7).text()
+
+
+def test_cancel_with_nothing_running_says_so(make_win, conn, tmp_path):
+    seed_job(conn, tmp_path, status="queued", captions=False)
+    win = make_win()
+    assert win.cancel_running_job() is False
+    assert "no job is running" in win.statusBar().currentMessage()

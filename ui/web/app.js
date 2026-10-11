@@ -3,6 +3,9 @@
 "use strict";
 
 const state = { jobs: [], detailId: null, token: localStorage.getItem("captioner.token") || "" };
+// The API pushes a snapshot when the queue changes; these pace the refetches
+// that follow, so a burst of events cannot turn into a burst of requests.
+const lastFetch = { jobs: 0, header: 0 };
 
 const $ = (id) => document.getElementById(id);
 
@@ -73,6 +76,13 @@ function renderJobs() {
 
     const status = document.createElement("td");
     status.appendChild(pill(job.status));
+    if (job.cancel_requested) {
+      const stopping = document.createElement("span");
+      stopping.className = "small";
+      stopping.textContent = "stopping";
+      stopping.title = "the worker stops at the next segment boundary";
+      status.appendChild(stopping);
+    }
 
     const model = document.createElement("td");
     model.className = "small";
@@ -90,8 +100,12 @@ function renderJobs() {
     const group = document.createElement("div");
     group.className = "actions";
     group.appendChild(button("view", () => showDetail(job.id), true));
-    if (job.status !== "running") {
+    if (job.status === "queued" || job.status === "running") {
+      group.appendChild(button("cancel", () => act("cancel", job.id), true));
+    } else {
       group.appendChild(button("retry", () => act("retry", job.id), true));
+    }
+    if (job.status !== "running") {
       group.appendChild(button("delete", () => act("delete", job.id), true));
     }
     actions.appendChild(group);
@@ -112,7 +126,12 @@ function renderJobs() {
 
 async function act(action, jobId) {
   try {
-    if (action === "retry") {
+    if (action === "cancel") {
+      const payload = await api(`/api/jobs/${jobId}/cancel`, { method: "POST", body: "{}" });
+      toast(payload.cancel === "requested"
+        ? `Job #${jobId} will stop at the next segment boundary`
+        : `Job #${jobId} canceled before it started`);
+    } else if (action === "retry") {
       await api(`/api/jobs/${jobId}/retry`, { method: "POST", body: "{}" });
       toast(`Job #${jobId} requeued`);
     } else if (action === "delete") {
@@ -136,9 +155,13 @@ async function showDetail(jobId) {
 
     const actions = $("detail-actions");
     actions.textContent = "";
-    if (job.status !== "running") {
+    if (job.status === "queued" || job.status === "running") {
+      actions.appendChild(button("cancel", () => act("cancel", job.id)));
+    } else {
       actions.appendChild(button("retry", () => act("retry", job.id)));
-      actions.appendChild(button("delete", () => act("delete", job.id)));
+    }
+    if (job.status !== "running") {
+      actions.appendChild(button("delete", () => act("delete", job.id), true));
     }
     if (job.captions) {
       actions.appendChild(button("copy SRT", () => copyCaptions(job.id, "srt"), true));
@@ -195,6 +218,7 @@ async function promptTranslate(jobId) {
 }
 
 async function refreshJobs() {
+  lastFetch.jobs = Date.now();
   try {
     const payload = await api("/api/jobs?limit=200");
     state.jobs = payload.jobs;
@@ -206,6 +230,7 @@ async function refreshJobs() {
 }
 
 async function refreshHeader() {
+  lastFetch.header = Date.now();
   try {
     const health = await api("/api/health");
     $("version").textContent = "v" + health.version;
@@ -272,12 +297,32 @@ $("token-save").addEventListener("click", () => {
   toast(state.token ? "Token saved" : "Token cleared");
   refreshHeader();
   refreshJobs();
+  connectEvents();  // the stream carries the token in its query string
 });
 
 if (state.token) $("token").value = state.token;
 
+let events = null;
+
+function connectEvents() {
+  if (!window.EventSource) return;  // the slow poll below still updates the page
+  if (events) events.close();
+  const query = state.token ? "?token=" + encodeURIComponent(state.token) : "";
+  events = new EventSource("/api/events" + query);
+  events.onmessage = () => {
+    // The snapshot only says something changed, so refetch what is on screen.
+    if (Date.now() - lastFetch.jobs > 250) refreshJobs();
+    if (Date.now() - lastFetch.header > 5000) refreshHeader();
+  };
+  // A dropped stream is not an error to report: EventSource reconnects on its
+  // own, and the 30s poll keeps the page honest in the meantime.
+  events.onerror = () => {};
+}
+
 refreshHeader();
 refreshJobs();
 fillSelects();
-setInterval(refreshJobs, 2000);
-setInterval(refreshHeader, 10000);
+connectEvents();
+setInterval(refreshJobs, 30000);  // fallback only: normally the stream drives this
+setInterval(refreshHeader, 30000);
+window.addEventListener("focus", () => refreshJobs());

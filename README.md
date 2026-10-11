@@ -28,7 +28,7 @@ folder can be watched so files caption themselves.
 | **Fine-tuned models** | Fine-tune Whisper on noisy audio yourself; converted models appear in the model picker automatically. |
 | **Live translation** | Translate live captions as they appear, into any of 27 languages — on their own thread, cached per sentence, so the captions never wait. |
 | **Pluggable engines** | Point the recognizer or the translator at an OpenAI-compatible API (OpenAI, Groq, LM Studio, faster-whisper-server) with two environment variables; the local models stay the default. |
-| **HTTP API + browser UI** | A JSON API with an OpenAPI description (`/openapi.json`) plus a browser page, so scripts or another machine can drive the queue. |
+| **HTTP API + browser UI** | A JSON API with an OpenAPI description (`/openapi.json`) plus a browser page, so scripts or another machine can drive the queue. The page is driven by server-sent events rather than polling. |
 | **Watch folders + webhooks** | Caption everything dropped into a folder unattended, then POST each finished job to a URL. |
 | **Honest queue** | A real worker/queue with cancel, progress, heartbeats and crash recovery — a power cut cannot wedge it. |
 
@@ -363,8 +363,10 @@ keeping with "the machine that can run this can serve this".
 | `GET /api/jobs` · `POST /api/jobs` | list the queue (newest first) / queue a file |
 | `GET /api/jobs/{id}` · `DELETE /api/jobs/{id}` | one job with its caption blocks / remove it |
 | `GET /api/jobs/{id}/captions?format=json` | the captions as rows (`srt`, `vtt`, `text` too) |
+| `POST /api/jobs/{id}/cancel` | stop a queued job; ask a running one to stop |
 | `POST /api/jobs/{id}/retry` · `POST /api/jobs/{id}/translate` | requeue, or write `captions.<lang>.srt` |
-| `GET /` · `GET /openapi.json` | the browser UI, and an OpenAPI 3.0 description of all of it |
+| `GET /api/events` | queue changes as server-sent events, so the page never polls |
+| `GET /` · `GET /favicon.ico` · `GET /openapi.json` | the browser UI, its icon, and an OpenAPI 3.0 description of all of it |
 
 ```powershell
 # queue a file and read back its captions, with no UI at all

@@ -74,33 +74,43 @@ class JobQueueMixin:
         return len(files)
 
     def cancel_running_job(self) -> bool:
-        """Abort the job this window's worker is running.
+        """Abort the running job, whoever owns it.
 
-        A job owned by another process (run_worker.bat, the CLI) cannot be
-        interrupted from here, so say so instead of pretending.
+        This window's own worker is stopped through its event. A job owned by
+        another process (run_worker.bat, the CLI, the API) is asked to stop
+        through the cancel_requested column, which that worker polls between
+        segments — so the button finally works for a worker started elsewhere.
         """
-        if self.worker_thread is None or not self.worker_thread.isRunning():
-            running = self.conn.execute(
-                "SELECT COUNT(*) FROM jobs WHERE status = 'running'"
-            ).fetchone()[0]
-            if running:
-                QMessageBox.information(
-                    self,
-                    "Job owned by another process",
-                    "A job is running outside this window (run_worker.bat or the CLI).\n\n"
-                    "Stop that process, then use Job × Recover stuck jobs if the "
-                    "row still says running.",
-                )
-            else:
-                self.statusBar().showMessage("no job is running", 3000)
+        if self.worker_thread is not None and self.worker_thread.isRunning():
+            self.worker_thread.cancel()
+            self._cancel_pending = True
+            self.btn_cancel.setEnabled(False)
+            self.statusBar().showMessage(
+                "canceling — the worker stops at the next segment boundary…", 6000
+            )
+            return True
+
+        row = self.conn.execute(
+            "SELECT id FROM jobs WHERE status = 'running' ORDER BY id LIMIT 1"
+        ).fetchone()
+        if row is None:
+            self.statusBar().showMessage("no job is running", 3000)
             return False
-        self.worker_thread.cancel()
-        self._cancel_pending = True
-        self.btn_cancel.setEnabled(False)
+        outcome = worker.request_cancel(self.conn, row["id"])
+        if outcome == "requested":
+            self._signature = None
+            self.refresh()
+            self.statusBar().showMessage(
+                f"asked job #{row['id']} (running in another process) to stop — "
+                "it finishes the segment it is on",
+                6000,
+            )
+            return True
         self.statusBar().showMessage(
-            "canceling — the worker stops at the next segment boundary…", 6000
+            f"job #{row['id']} already finished; nothing to stop", 4000
         )
-        return True
+        self.refresh()
+        return False
 
     def recover_stuck(self) -> int:
         """Requeue jobs whose worker died mid-run."""
@@ -226,8 +236,8 @@ class JobQueueMixin:
             self._scan_watch_folder()
         rows = self.conn.execute(
             "SELECT id, file_name, file_path, status, model_size, progress, stage, "
-            "heartbeat_at, error, created_at, started_at, finished_at "
-            "FROM jobs ORDER BY id"
+            "heartbeat_at, error, created_at, started_at, finished_at, "
+            "cancel_requested FROM jobs ORDER BY id"
         ).fetchall()
         # Rebuild only when something visible changed (avoids per-second flicker);
         # progress, stage, and a running job's elapsed/staleness are all
@@ -241,6 +251,7 @@ class JobQueueMixin:
                 r["finished_at"],
                 r["progress"],
                 r["stage"],
+                r["cancel_requested"],
                 _elapsed(r["started_at"], r["finished_at"]) if r["status"] == "running" else "",
                 int(worker.seconds_since(r["heartbeat_at"]) // 15)
                 if r["status"] == "running"
@@ -278,6 +289,8 @@ class JobQueueMixin:
                     age = worker.seconds_since(r["heartbeat_at"])
                     if age > STALL_WARNING_SECONDS:
                         details += f" · no update for {_human_age(age)}"
+                    if r["cancel_requested"]:
+                        details += " · stopping at the next boundary"
                 elif r["status"] == "canceled":
                     details = "canceled — retry to transcribe again"
                 else:

@@ -6,6 +6,27 @@ measured on the development machine (RTX 4050 laptop, 6 GB VRAM, i5-12450HX,
 
 ## Unreleased
 
+### Added
+- **Cancellation works everywhere, and across processes.** Stopping a job used
+  to be an in-process event owned by the dashboard: the API and the CLI had no
+  way to stop anything, and a worker started in its own console
+  (`run_worker.bat`) could not be reached at all. The request is now a
+  `cancel_requested` column that the worker holding the job polls, so
+  `POST /api/jobs/{id}/cancel`, `python cli.py cancel <id>`, the dashboard's
+  button and a Cancel button in the browser UI all stop a job wherever it is
+  running. A queued job is called off outright (200); a running one stops at the
+  next segment boundary (202, and `cancel_requested: true` in the JSON).
+- **Live queue updates in the browser UI.** `GET /api/events` streams a small
+  snapshot whenever the queue changes. The page used to re-read five endpoints
+  every two seconds; it now opens one stream and keeps a slow poll only as a
+  fallback. The stream is bounded and says goodbye before closing, so a request
+  thread cannot be orphaned by a page that goes away.
+- `GET /favicon.ico` serves the app icon; a browser tab is no longer unbranded.
+- Security headers: `X-Content-Type-Options: nosniff` and `Referrer-Policy`
+  everywhere, plus a `Content-Security-Policy` on the HTML page (its own origin
+  only, no inline anything).
+- Tests for the CLI, which had none: `cancel` and the `(stopping)` status hint.
+
 ### Changed
 - **A new app icon.** `scripts/make_icon.py` now draws the mark at every size it
   ships (16, 20, 24, 32, 40, 48, 64, 128, 256) instead of embedding one 256px

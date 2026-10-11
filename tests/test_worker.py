@@ -364,6 +364,93 @@ def test_canceled_job_is_not_claimed_again(tmp_db, monkeypatch):
     ).fetchone()["status"] == "canceled"
 
 
+def test_another_process_can_cancel_a_running_job(tmp_db, monkeypatch):
+    """The API or CLI can stop a worker that lives in a different process.
+
+    The flag is written through a *second* connection, which is exactly what a
+    separate process looks like from here: nothing is shared but the database.
+    No in-process event is passed, so only the DB path can be doing the work.
+    """
+    job_id = worker.enqueue(tmp_db, "sample.mp4")
+    job = worker.claim_next(tmp_db)
+    elsewhere = db.connect()
+
+    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None):
+        assert worker.request_cancel(elsewhere, job_id) == "requested"
+        assert should_cancel is not None and should_cancel() is True
+        raise TranscriptionCancelled("asked to stop")
+
+    monkeypatch.setattr(worker, "transcribe_words", fake)
+    try:
+        worker.run_pipeline(tmp_db, job)
+    finally:
+        elsewhere.close()
+
+    row = tmp_db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert row["status"] == "canceled"
+    assert row["cancel_requested"] == 0  # honored, so it is cleared
+
+
+def test_request_cancel_calls_off_a_queued_job(tmp_db):
+    """A job that has not started needs nobody's cooperation to stop."""
+    job_id = worker.enqueue(tmp_db, "sample.mp4")
+    assert worker.request_cancel(tmp_db, job_id) == "canceled"
+
+    row = tmp_db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert row["status"] == "canceled" and row["finished_at"] is not None
+    assert worker.claim_next(tmp_db) == {}  # and it is never picked up
+
+
+def test_request_cancel_on_a_running_job_only_asks(tmp_db):
+    job_id = worker.enqueue(tmp_db, "sample.mp4")
+    worker.claim_next(tmp_db)
+    assert worker.request_cancel(tmp_db, job_id) == "requested"
+
+    row = tmp_db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert row["status"] == "running"  # the worker decides when it stops
+    assert row["cancel_requested"] == 1
+
+
+def test_request_cancel_reports_a_settled_job_as_nothing_to_stop(tmp_db):
+    for status in ("done", "error", "canceled"):
+        job_id = worker.enqueue(tmp_db, "sample.mp4")
+        worker.claim_next(tmp_db)
+        tmp_db.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, job_id))
+        tmp_db.commit()
+        assert worker.request_cancel(tmp_db, job_id) is None, status
+        assert tmp_db.execute(
+            "SELECT status FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()["status"] == status
+
+
+def test_retry_clears_a_stale_cancel_request(tmp_db):
+    """A cancel that lands just as a job dies must not kill the retry."""
+    job_id = worker.enqueue(tmp_db, "sample.mp4")
+    worker.claim_next(tmp_db)
+    worker.request_cancel(tmp_db, job_id)
+
+    worker.retry(tmp_db, job_id)
+    row = tmp_db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert row["status"] == "queued"
+    assert row["cancel_requested"] == 0
+
+
+def test_recover_stale_honours_a_cancel_request(tmp_db):
+    """A job canceled while its worker was down is canceled, not run again."""
+    job_id = worker.enqueue(tmp_db, "sample.mp4")
+    worker.claim_next(tmp_db)
+    worker.request_cancel(tmp_db, job_id)
+    tmp_db.execute(
+        "UPDATE jobs SET heartbeat_at = '2000-01-01 00:00:00' WHERE id = ?", (job_id,)
+    )
+    tmp_db.commit()
+
+    assert worker.recover_stale(tmp_db) == 0  # nothing was requeued
+    row = tmp_db.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert row["status"] == "canceled"
+    assert row["cancel_requested"] == 0
+
+
 #heartbeat
 
 

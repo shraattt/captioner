@@ -199,9 +199,14 @@ def claim_next(conn) -> dict:
 def run_pipeline(conn, job: dict, cancel: threading.Event | None = None) -> None:
     """Execute one claimed job; flips it to done, error, or canceled.
 
-    ``cancel`` is an optional event the UI sets to abort mid-job: the
-    transcribe loop checks it between segments, so a long file stops within a
-    few seconds instead of finishing first.
+    Two ways to stop a job, checked between segments so a long file stops
+    within a few seconds instead of finishing first:
+
+    * ``cancel`` — an in-process event the dashboard sets. Only useful when
+      this process owns the job.
+    * the ``cancel_requested`` column — set by any client (the API, the CLI,
+      another dashboard) and polled here, so a worker started in its own
+      console can be stopped by a client that never imported it.
     """
     job_id = job["id"]
     status = JobStatusWriter(conn, job_id)
@@ -214,13 +219,18 @@ def run_pipeline(conn, job: dict, cancel: threading.Event | None = None) -> None
     def on_stage(stage: str, fraction: float | None) -> None:
         status.note(stage=stage, fraction=fraction)
 
+    def should_cancel() -> bool:
+        if cancel is not None and cancel.is_set():
+            return True
+        return cancel_requested(conn, job_id)
+
     try:
         words = transcribe_words(
             job["file_path"],
             job["model_size"],
             on_progress=on_progress,
             on_stage=on_stage,
-            should_cancel=cancel.is_set if cancel is not None else None,
+            should_cancel=should_cancel,
         )
 
         # Phase 2: optional wav2vec2 alignment. Runs on Whisper's words before
@@ -312,13 +322,55 @@ def _diarize_turns(path: str):
 
 
 def _settle(conn, job_id: int, status: str, error: str | None = None) -> None:
-    """Mark a job finished, clearing the live-run bookkeeping columns."""
+    """Mark a job finished, clearing the live-run bookkeeping columns.
+
+    ``cancel_requested`` is cleared too: it has been honored by now, and a
+    leftover flag would stop the job the moment it was retried.
+    """
     conn.execute(
         "UPDATE jobs SET status = ?, progress = NULL, stage = NULL, "
-        "error = ?, finished_at = ? WHERE id = ?",
+        "error = ?, finished_at = ?, cancel_requested = 0 WHERE id = ?",
         (status, error, _now(), job_id),
     )
     conn.commit()
+
+
+def cancel_requested(conn, job_id: int) -> bool:
+    """Has any client asked for this job to stop?"""
+    try:
+        row = conn.execute(
+            "SELECT cancel_requested FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    except sqlite3.Error as exc:  # pragma: no cover - bookkeeping only
+        logger.debug("cancel check failed for job %s: %s", job_id, exc)
+        return False
+    return bool(row is not None and row["cancel_requested"])
+
+
+def request_cancel(conn, job_id: int) -> str | None:
+    """Ask a job to stop, from any process.
+
+    Returns ``"canceled"`` when a queued job was called off before it started
+    (nothing has to cooperate), ``"requested"`` when a running job will stop at
+    the next segment boundary, or ``None`` when the job has already settled and
+    there is nothing left to stop.
+    """
+    with conn:  # both updates are single statements, so the race is benign
+        changed = conn.execute(
+            "UPDATE jobs SET status = 'canceled', finished_at = ?, "
+            "progress = NULL, stage = NULL, heartbeat_at = NULL "
+            "WHERE id = ? AND status = 'queued'",
+            (_now(), job_id),
+        ).rowcount
+        if changed:
+            return "canceled"
+        changed = conn.execute(
+            "UPDATE jobs SET cancel_requested = 1 WHERE id = ? AND status = 'running'",
+            (job_id,),
+        ).rowcount
+        if changed:
+            return "requested"
+    return None
 
 
 def recover_stale(conn, max_age_seconds: float = STALE_AFTER_SECONDS) -> int:
@@ -336,15 +388,28 @@ def recover_stale(conn, max_age_seconds: float = STALE_AFTER_SECONDS) -> int:
         for row in conn.execute("SELECT id, heartbeat_at FROM jobs WHERE status = 'running'")
         if _age_seconds(row["heartbeat_at"], now) > max_age_seconds
     ]
+    requeued = 0
     for job_id in stale:
+        if cancel_requested(conn, job_id):
+            # The user asked for a stop and the worker died before honoring it;
+            # honoring it now is what they wanted, not another attempt.
+            conn.execute(
+                "UPDATE jobs SET status = 'canceled', progress = NULL, "
+                "stage = NULL, heartbeat_at = NULL, finished_at = ?, "
+                "cancel_requested = 0 WHERE id = ?",
+                (_now(), job_id),
+            )
+            logger.info("Job %d was canceled while its worker was down", job_id)
+            continue
         conn.execute(
             "UPDATE jobs SET status = 'queued', error = NULL, progress = NULL, "
             "stage = NULL, heartbeat_at = NULL, started_at = NULL, "
             "finished_at = NULL WHERE id = ?",
             (job_id,),
         )
+        requeued += 1
     conn.commit()
-    return len(stale)
+    return requeued
 
 
 def _age_seconds(stamp: str | None, now: float) -> float:
@@ -423,10 +488,11 @@ def run_forever(conn, cancel: threading.Event | None = None) -> None:
 
 
 def retry(conn, job_id: int) -> None:
+    """Queue a settled job again, clearing any stale cancel request."""
     conn.execute(
         "UPDATE jobs SET status = 'queued', error = NULL, progress = NULL, "
-        "stage = NULL, heartbeat_at = NULL, "
-        "started_at = NULL, finished_at = NULL WHERE id = ?",
+        "stage = NULL, heartbeat_at = NULL, started_at = NULL, "
+        "finished_at = NULL, cancel_requested = 0 WHERE id = ?",
         (job_id,),
     )
     conn.commit()
