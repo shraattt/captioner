@@ -41,7 +41,7 @@ measured on the development machine (RTX 4050 laptop, 6 GB VRAM, i5-12450HX,
 - **The dashboard is a package (`ui/dashboard/`).** The 2,000-line single
   module became `window.py` plus mixins for jobs, preview, live and worker
   control, with `theme.py`, `formatting.py`, `widgets.py`, `services.py` and
-  `constants.py` beside them - the largest module is now ~540 lines and each
+  `constants.py` beside them - the largest module is now ~620 lines and each
   file owns one concern. `from ui.dashboard import Dashboard` and
   `PlaybackControls` still work; the app is launched with
   `python -m ui.dashboard` (the `.bat`, `.vbs` and shortcut launchers were
@@ -64,11 +64,11 @@ measured on the development machine (RTX 4050 laptop, 6 GB VRAM, i5-12450HX,
   statement) and LF line endings that `cmd.exe` misparses.
 
 ### Verification
-- 360+ tests pass, including the new engine, API, automation and live
-  translation suites. The webhook tests talk to a real loopback HTTP server;
-  the API tests drive a real server through a real HTTP client (routing, status
-  codes, token auth, cross-origin writes, path traversal, oversize and
-  malformed bodies, queueing end to end).
+- 325 tests pass (324 passed, 1 skipped), including the new engine, API,
+  automation and live translation suites. The webhook tests talk to a real
+  loopback HTTP server; the API tests drive a real server through a real HTTP
+  client (routing, status codes, token auth, cross-origin writes, path
+  traversal, oversize and malformed bodies, queueing end to end).
 
 ## 0.6.0 — Phase 4 + Phase 5: fine-tuned models, and the rest of Phase 2
 
