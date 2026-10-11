@@ -457,6 +457,56 @@ def test_cancel_of_an_unknown_job_is_a_404(server):
     assert status == 404 and "424242" in payload["error"]["message"]
 
 
+#duplicate content
+
+
+def test_queueing_the_same_content_again_answers_with_the_first_job(server, data_paths):
+    """Two names, one recording: nothing is queued a second time."""
+    _httpd, base = server
+    original = make_media(data_paths, "lecture.mp4")
+    copy = data_paths / "second-name.mp4"
+    copy.write_bytes(original.read_bytes())
+
+    status, _type, payload = call(base, "/api/jobs", "POST", {"path": str(original)})
+    assert status == 202 and payload["duplicate"] is False
+    job_id = payload["job"]["id"]
+
+    status, _type, payload = call(base, "/api/jobs", "POST", {"path": str(copy)})
+    assert status == 200 and payload["duplicate"] is True
+    assert payload["job"]["id"] == job_id
+    assert payload["job"]["file_name"] == "lecture.mp4"
+
+    conn = db.connect()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_a_finished_job_blocks_the_same_content(server, data_paths):
+    """Already transcribed counts as already handled."""
+    _httpd, base = server
+    job_id = queue_job(data_paths, name="lecture.mp4", status="done")
+    copy = data_paths / "lecture-copy.mp4"
+    copy.write_bytes((data_paths / "lecture.mp4").read_bytes())
+
+    status, _type, payload = call(base, "/api/jobs", "POST", {"path": str(copy)})
+    assert status == 200 and payload["duplicate"] is True
+    assert payload["job"]["id"] == job_id
+
+
+def test_a_failed_job_does_not_block_the_same_content(server, data_paths):
+    """A failure is worth retrying, so the file is queued again."""
+    _httpd, base = server
+    queue_job(data_paths, name="lecture.mp4", status="error")
+    copy = data_paths / "lecture-copy.mp4"
+    copy.write_bytes((data_paths / "lecture.mp4").read_bytes())
+
+    status, _type, payload = call(base, "/api/jobs", "POST", {"path": str(copy)})
+    assert status == 202 and payload["duplicate"] is False
+    assert payload["job"]["file_name"] == "lecture-copy.mp4"
+
+
 #live updates
 
 

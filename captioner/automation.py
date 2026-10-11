@@ -104,13 +104,25 @@ def find_new_media(
 ) -> list[Path]:
     """Media in the watched folders that the queue has not seen yet.
 
-    Paths already in the jobs table are skipped, so re-scanning is idempotent.
-    Oldest first, which for a drop-and-walk-away folder is the order the files
-    finished arriving.
+    Two things are skipped, so re-scanning is idempotent: paths already in the
+    jobs table, and files whose *content* is already queued or done - a lecture
+    copied in under a second name is the same lecture. Oldest first, which for
+    a drop-and-walk-away folder is the order the files finished arriving.
     """
+    from .worker import file_digest  # local: worker imports this module
+
     known = {
         str(Path(row[0]).resolve()) if row[0] else ""
         for row in conn.execute("SELECT file_path FROM jobs")
+    }
+    # Only content the queue has actually handled counts, matching
+    # worker.find_duplicate: a file whose earlier attempt errored is worth
+    # trying again rather than silently skipping forever.
+    seen_content = {
+        row[0] for row in conn.execute(
+            "SELECT file_hash FROM jobs "
+            "WHERE file_hash IS NOT NULL AND status IN ('running', 'queued', 'done')"
+        )
     }
     found: list[Path] = []
     for folder in (dirs if dirs is not None else watch_dirs()):
@@ -128,7 +140,14 @@ def find_new_media(
                 continue
             if key in known:
                 continue
+            digest = file_digest(path)
+            if digest is not None and digest in seen_content:
+                logger.info("skipping %s: the same content is already queued", path.name)
+                known.add(key)
+                continue
             known.add(key)
+            if digest is not None:
+                seen_content.add(digest)
             found.append(path)
     found.sort(key=lambda p: (p.stat().st_mtime, p.name))
     return found

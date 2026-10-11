@@ -49,10 +49,23 @@ class JobQueueMixin:
         }
 
     def add_paths(self, paths) -> int:
-        """Queue media found in `paths` (files and folders); returns the count."""
+        """Queue media found in `paths` (files and folders); returns the count.
+
+        A file whose content is already queued, running or finished is skipped:
+        re-adding the same recording under a second name should not buy it a
+        second transcription. The status bar names what was skipped, so it is
+        never a silent no-op.
+        """
         model = self.model_combo.currentText()
         options = self._queue_options()
-        files = _expand_media(paths)
+        skipped = []
+        files = []
+        for path in _expand_media(paths):
+            existing = worker.find_duplicate(self.conn, path)
+            if existing is None:
+                files.append(path)
+            else:
+                skipped.append((path.name, existing["id"]))
         for path in files:
             worker.enqueue(self.conn, str(path), model_size=model, **options)
         if files:
@@ -68,7 +81,15 @@ class JobQueueMixin:
                 if on
             ]
             suffix = f" [{', '.join(extras)}]" if extras else ""
-            self.statusBar().showMessage(f"queued {len(files)} file(s) with {model}{suffix}", 4000)
+            note = f", skipped {len(skipped)} already queued" if skipped else ""
+            self.statusBar().showMessage(
+                f"queued {len(files)} file(s) with {model}{suffix}{note}", 4000
+            )
+        elif skipped:
+            name, job_id = skipped[0]
+            self.statusBar().showMessage(
+                f"already queued: {name} (job #{job_id}) — nothing added", 6000
+            )
         else:
             self.statusBar().showMessage("nothing added — no media files found", 4000)
         return len(files)

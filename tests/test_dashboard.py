@@ -111,8 +111,9 @@ def test_add_paths_queues_with_selected_model(make_win, conn, tmp_path):
     win.model_combo.setCurrentText("small.en")
     first = tmp_path / "one.mp4"
     second = tmp_path / "two.wav"
-    first.write_bytes(b"x")
-    second.write_bytes(b"x")
+    # Different bytes: identical content is treated as the same recording.
+    first.write_bytes(b"first clip")
+    second.write_bytes(b"second clip")
 
     queued = win.add_paths([str(first), str(second), str(tmp_path / "missing.mp4")])
 
@@ -158,9 +159,9 @@ def test_remove_refuses_running_job(make_win, conn, tmp_path):
 def test_folders_are_expanded_recursively(make_win, conn, tmp_path):
     folder = tmp_path / "course"
     (folder / "week1").mkdir(parents=True)
-    (folder / "intro.mp4").write_bytes(b"x")
-    (folder / "week1" / "part1.wav").write_bytes(b"x")
-    (folder / "week1" / "slides.pdf").write_bytes(b"x")  # not media
+    (folder / "intro.mp4").write_bytes(b"intro")
+    (folder / "week1" / "part1.wav").write_bytes(b"part one")
+    (folder / "week1" / "slides.pdf").write_bytes(b"slides")  # not media
     win = make_win()
 
     assert win.add_paths([str(folder)]) == 2
@@ -264,6 +265,20 @@ def test_options_default_to_off(make_win):
     assert win._queue_options() == {"diarize": False, "align": False, "translate_to": None}
     assert win.translate_combo.itemData(0) == ""  # "Off" is first
     assert win.translate_combo.count() > 1
+
+
+def test_adding_a_file_already_in_the_queue_is_reported(make_win, conn, tmp_path):
+    """Re-adding the same recording says so instead of queueing it twice."""
+    win = make_win()
+    lecture = tmp_path / "lecture.mp4"
+    copy = tmp_path / "lecture-copy.mp4"
+    lecture.write_bytes(b"one lecture")
+    copy.write_bytes(b"one lecture")
+
+    assert win.add_paths([str(lecture)]) == 1
+    assert win.add_paths([str(copy)]) == 0
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+    assert "already queued" in win.statusBar().currentMessage()
 
 
 def test_cancel_asks_a_job_owned_by_another_process_to_stop(make_win, conn, tmp_path):

@@ -33,6 +33,11 @@ def cmd_add(args, conn) -> int:
         except ValueError as exc:
             print(f"error: {exc}")
             return 2
+    existing = worker.find_duplicate(conn, path)
+    if existing is not None:
+        print(f"already has a job: #{existing['id']} ({existing['status']}) - "
+              "delete it first to transcribe this audio again")
+        return 0
     job_id = worker.enqueue(
         conn, str(path),
         diarize=args.diarize, align=args.align, translate_to=args.translate_to,

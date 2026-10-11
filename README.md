@@ -30,6 +30,7 @@ folder can be watched so files caption themselves.
 | **Pluggable engines** | Point the recognizer or the translator at an OpenAI-compatible API (OpenAI, Groq, LM Studio, faster-whisper-server) with two environment variables; the local models stay the default. |
 | **HTTP API + browser UI** | A JSON API with an OpenAPI description (`/openapi.json`) plus a browser page, so scripts or another machine can drive the queue. The page is driven by server-sent events rather than polling. |
 | **Watch folders + webhooks** | Caption everything dropped into a folder unattended, then POST each finished job to a URL. |
+| **Content de-duplication** | A recording copied in under a second name is recognised by content (size plus both ends of the file), so the same audio is never transcribed twice. Delete the job to run it again. |
 | **Honest queue** | A real worker/queue with cancel, progress, heartbeats and crash recovery — a power cut cannot wedge it. |
 
 Measured on 100 held-out noisy clips (synthetic noise over LibriSpeech, RTX 4050
@@ -360,7 +361,7 @@ keeping with "the machine that can run this can serve this".
 | `GET /api/health` | version, queue counts, selected engines, watched folders |
 | `GET /api/engines` | every backend, its description and its availability |
 | `GET /api/models` · `GET /api/languages` | the pickers' options |
-| `GET /api/jobs` · `POST /api/jobs` | list the queue (newest first) / queue a file |
+| `GET /api/jobs` · `POST /api/jobs` | list the queue (newest first) / queue a file (`200` + `duplicate: true` if the content is already handled) |
 | `GET /api/jobs/{id}` · `DELETE /api/jobs/{id}` | one job with its caption blocks / remove it |
 | `GET /api/jobs/{id}/captions?format=json` | the captions as rows (`srt`, `vtt`, `text` too) |
 | `POST /api/jobs/{id}/cancel` | stop a queued job; ask a running one to stop |
@@ -607,7 +608,7 @@ sessions — no leaks), `stress_mixed.py` (batch + live sharing the GPU),
 .venv\Scripts\python -m pytest
 ```
 
-326 tests covering segmentation, subtitle writers, the caption editor,
+367 tests covering segmentation, subtitle writers, the caption editor,
 diarization, alignment, translation, the engine registry and both API backends,
 the HTTP API (routing, status codes, token auth, cross-origin writes, path
 traversal, queueing end to end), the watch scanner and webhook delivery against a

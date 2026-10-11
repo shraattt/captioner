@@ -21,6 +21,16 @@ measured on the development machine (RTX 4050 laptop, 6 GB VRAM, i5-12450HX,
   every two seconds; it now opens one stream and keeps a slow poll only as a
   fallback. The stream is bounded and says goodbye before closing, so a request
   thread cannot be orphaned by a page that goes away.
+- **Content de-duplication, using the `file_hash` column that until now nothing
+  wrote or read.** Queuing, watching or adding a file whose content is already
+  queued, running or done reuses that job instead of spending another full
+  transcription on it: the API answers `200` with `duplicate: true` and the job
+  it already has, the CLI says which job covers the file, and the dashboard
+  reports what it skipped. The fingerprint is the file's size plus both ends
+  (not a full-file read, which would mean hashing a two-hour lecture before it
+  could be queued). Failed and canceled jobs do not count as duplicates - those
+  are exactly the ones worth retrying - and the watch scanner follows the same
+  rule, so a file whose attempt errored is picked up again.
 - `GET /favicon.ico` serves the app icon; a browser tab is no longer unbranded.
 - Security headers: `X-Content-Type-Options: nosniff` and `Referrer-Policy`
   everywhere, plus a `Content-Security-Policy` on the HTML page (its own origin

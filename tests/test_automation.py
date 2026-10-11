@@ -29,9 +29,12 @@ def conn(tmp_path, monkeypatch):
     connection.close()
 
 
-def media_file(path, content=b"x"):
+def media_file(path, content=None):
+    # Distinct content per path by default: the scanner now skips a file whose
+    # content is already queued, so identical placeholder bytes would make two
+    # genuinely different files look like the same recording.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
+    path.write_bytes(content if content is not None else path.name.encode("utf-8"))
     old = time.time() - 60
     import os
 
@@ -108,6 +111,30 @@ def test_find_new_media_skips_what_is_not_ready(conn, tmp_path):
     found = automation.find_new_media(conn)
     assert found == [good, nested] or found == [nested, good]
     assert set(found) == {good, nested}
+
+
+def test_find_new_media_skips_a_renamed_copy_of_queued_content(conn, tmp_path):
+    """The same lecture copied in under a new name is the same lecture."""
+    uploads = config.UPLOADS_DIR
+    uploads.mkdir(parents=True, exist_ok=True)
+    original = media_file(uploads / "lecture.mp4", content=b"one lecture")
+    media_file(uploads / "lecture (1).mp4", content=b"one lecture")
+    worker.enqueue(conn, str(original))
+
+    assert automation.find_new_media(conn) == []
+
+
+def test_find_new_media_requeues_content_that_failed(conn, tmp_path):
+    """A failed attempt must not hide the file from the scanner forever."""
+    uploads = config.UPLOADS_DIR
+    uploads.mkdir(parents=True, exist_ok=True)
+    original = media_file(uploads / "lecture.mp4", content=b"one lecture")
+    copy = media_file(uploads / "lecture (1).mp4", content=b"one lecture")
+    job_id = worker.enqueue(conn, str(original))
+    conn.execute("UPDATE jobs SET status = 'error' WHERE id = ?", (job_id,))
+    conn.commit()
+
+    assert automation.find_new_media(conn) == [copy]
 
 
 def test_find_new_media_is_idempotent(conn):

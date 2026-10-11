@@ -451,6 +451,75 @@ def test_recover_stale_honours_a_cancel_request(tmp_db):
     assert row["cancel_requested"] == 0
 
 
+#duplicate content
+
+
+def test_the_digest_follows_the_content_not_the_name(tmp_path):
+    first = tmp_path / "one.mp4"
+    renamed = tmp_path / "renamed.mp4"
+    other = tmp_path / "different.mp4"
+    first.write_bytes(b"lecture audio")
+    renamed.write_bytes(b"lecture audio")
+    other.write_bytes(b"lecture audio!")
+
+    assert worker.file_digest(first) == worker.file_digest(renamed)
+    assert worker.file_digest(first) != worker.file_digest(other)
+    assert worker.file_digest(tmp_path / "missing.mp4") is None
+
+
+def test_the_digest_reads_both_ends_of_a_large_file(tmp_path):
+    """Sampling the ends must catch a difference at the end, not only the start."""
+    size = worker.DIGEST_CHUNK + 10
+    head = tmp_path / "head.mp4"
+    tail = tmp_path / "tail.mp4"
+    head.write_bytes(b"A" * size + b"same")
+    tail.write_bytes(b"A" * size + b"diff")
+    assert worker.file_digest(head) != worker.file_digest(tail)
+
+
+def test_enqueue_records_the_content_digest(tmp_db, tmp_path):
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"media")
+    job_id = worker.enqueue(tmp_db, str(clip))
+    row = tmp_db.execute(
+        "SELECT file_hash FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert row["file_hash"] == worker.file_digest(clip)
+
+
+def test_find_duplicate_matches_the_same_content_under_another_name(tmp_db, tmp_path):
+    original = tmp_path / "lecture.mp4"
+    original.write_bytes(b"same recording")
+    copy = tmp_path / "lecture copy.mp4"
+    copy.write_bytes(b"same recording")
+    job_id = worker.enqueue(tmp_db, str(original))
+
+    match = worker.find_duplicate(tmp_db, copy)
+    assert match is not None and match["id"] == job_id
+    assert worker.find_duplicate(tmp_db, original)["id"] == job_id
+
+
+@pytest.mark.parametrize("status", ["queued", "running", "done"])
+def test_find_duplicate_counts_a_handled_job(tmp_db, tmp_path, status):
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"media")
+    job_id = worker.enqueue(tmp_db, str(clip))
+    tmp_db.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, job_id))
+    tmp_db.commit()
+    assert worker.find_duplicate(tmp_db, clip) is not None
+
+
+@pytest.mark.parametrize("status", ["error", "canceled"])
+def test_find_duplicate_ignores_a_job_worth_retrying(tmp_db, tmp_path, status):
+    """A failed attempt must not block the file forever."""
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"media")
+    job_id = worker.enqueue(tmp_db, str(clip))
+    tmp_db.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, job_id))
+    tmp_db.commit()
+    assert worker.find_duplicate(tmp_db, clip) is None
+
+
 #heartbeat
 
 

@@ -17,7 +17,7 @@ Routes (all JSON unless noted):
     GET    /api/models                model labels the pickers offer
     GET    /api/languages             translation targets
     GET    /api/jobs                  the queue, newest first
-    POST   /api/jobs                  queue a file
+    POST   /api/jobs                  queue a file (200 if already queued)
     GET    /api/jobs/{id}             one job, with its caption blocks
     GET    /api/jobs/{id}/captions    captions as json, srt, vtt or text
     POST   /api/jobs/{id}/cancel      stop a queued or running job
@@ -314,6 +314,12 @@ def h_jobs_create(request: Request) -> tuple[int, object]:
     if path.suffix.lower() not in automation.MEDIA_EXTS:
         raise ApiError(400, f"unsupported media type {path.suffix or '(none)'}")
 
+    existing = worker.find_duplicate(request.conn, path)
+    if existing is not None:
+        # 200, not 202: nothing was queued. The caller gets the job that already
+        # covers this file so it can follow that one instead.
+        return 200, {"job": _job_dict(existing, request.conn), "duplicate": True}
+
     translate_to = request.body_str("translate_to")
     if translate_to:
         try:
@@ -328,7 +334,7 @@ def h_jobs_create(request: Request) -> tuple[int, object]:
         translate_to=translate_to,
     )
     row = _fetch_job(request.conn, job_id)
-    return 202, {"job": _job_dict(row, request.conn)}
+    return 202, {"job": _job_dict(row, request.conn), "duplicate": False}
 
 
 def h_job_detail(request: Request) -> tuple[int, object]:

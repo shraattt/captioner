@@ -10,6 +10,7 @@ Pipeline per job:
   mark running -> transcribe to words -> segment into caption blocks
   -> store captions -> write SRT/VTT -> mark done (or error + message).
 """
+import hashlib
 import logging
 import sqlite3
 import threading
@@ -146,6 +147,35 @@ class JobStatusWriter:
                 conn.close()
 
 
+DIGEST_CHUNK = 1024 * 1024
+# Statuses that mean "this content is already handled". Error and canceled are
+# deliberately absent: those rows exist to be retried, not skipped.
+HANDLED_STATUSES = ("running", "queued", "done")
+
+
+def file_digest(path: str | Path) -> str | None:
+    """A fast fingerprint of a file's content, or None if it cannot be read.
+
+    Size plus the first and last megabyte, not the whole file: a two-hour
+    lecture would otherwise cost a full disk read before it could even be
+    queued. That is enough to tell one recording from another, and it is only
+    ever compared against other rows - delete a job to transcribe its audio
+    again.
+    """
+    target = Path(path)
+    try:
+        size = target.stat().st_size
+        digest = hashlib.sha256(str(size).encode("utf-8"))
+        with target.open("rb") as handle:
+            digest.update(handle.read(DIGEST_CHUNK))
+            if size > DIGEST_CHUNK:
+                handle.seek(max(DIGEST_CHUNK, size - DIGEST_CHUNK))
+                digest.update(handle.read(DIGEST_CHUNK))
+    except OSError:  # missing, unreadable, or a directory
+        return None
+    return digest.hexdigest()
+
+
 def enqueue(
     conn,
     file_path: str,
@@ -158,15 +188,17 @@ def enqueue(
 
     ``align`` / ``translate_to`` / ``diarize`` are stored on the row rather
     than passed to the worker, so a job keeps the options it was queued with
-    even if the UI checkboxes change (or another worker picks it up).
+    even if the UI checkboxes change (or another worker picks it up). The row
+    also carries a content digest, which is what ``find_duplicate`` matches on.
     """
     p = Path(file_path)
     cur = conn.execute(
-        "INSERT INTO jobs (file_path, file_name, model_size, created_at, "
-        "diarize, align, translate_to) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO jobs (file_path, file_name, file_hash, model_size, "
+        "created_at, diarize, align, translate_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             str(p.resolve()),
             p.name,
+            file_digest(p),
             model_size or config.BATCH_MODEL_SIZE,
             _now(),
             1 if diarize else 0,
@@ -176,6 +208,30 @@ def enqueue(
     )
     conn.commit()
     return cur.lastrowid
+
+
+def find_duplicate(conn, file_path: str | Path) -> dict | None:
+    """An existing job for the same content, if the queue has already seen it.
+
+    The same lecture copied under a second name, or downloaded twice into the
+    watch folder, should not cost another full transcription. Callers decide
+    what to do about it: the API answers with the job it already has, the CLI
+    and the dashboard say so and skip the file. A path that cannot be read has
+    no digest and therefore never matches.
+
+    Finished jobs count as duplicates. Re-transcribing the same audio is
+    "delete the job, then queue it again", which keeps the rule simple.
+    """
+    digest = file_digest(file_path)
+    if digest is None:
+        return None
+    row = conn.execute(
+        "SELECT * FROM jobs WHERE file_hash = ? AND status IN (?, ?, ?) "
+        "ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, "
+        "id DESC LIMIT 1",
+        (digest, *HANDLED_STATUSES),
+    ).fetchone()
+    return dict(row) if row is not None else None
 
 
 def claim_next(conn) -> dict:

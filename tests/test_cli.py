@@ -71,6 +71,27 @@ def test_cancel_of_a_finished_job_is_not_an_error(cli_env, capsys):
     assert "already done" in capsys.readouterr().out
 
 
+def test_add_reports_the_job_that_already_covers_the_file(cli_env, capsys):
+    """The same audio under a second name is not queued twice."""
+    original = cli_env / "lecture.mp4"
+    original.write_bytes(b"one lecture")
+    copy = cli_env / "lecture-copy.mp4"
+    copy.write_bytes(b"one lecture")
+
+    assert cli.main(["add", str(original)]) == 0
+    assert "queued job #" in capsys.readouterr().out
+
+    assert cli.main(["add", str(copy)]) == 0
+    out = capsys.readouterr().out
+    assert "already has a job: #1 (queued)" in out
+
+    conn = db.connect()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
 def test_status_marks_a_job_that_is_stopping(cli_env, capsys):
     job_id = seed(cli_env, status="running")
     conn = db.connect()
