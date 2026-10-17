@@ -261,12 +261,12 @@ cache):
 | App folder build | 70-76 s | 935 s |
 | App folder | 1.3 GiB | 4.8 GiB (5,117,865,752 bytes) |
 | Portable `.zip` | - | 3,091,725,066 bytes, ~11 min |
-| Setup `.exe` | 245 s, 1,491,505,188 bytes | 73 s, 3,179,586,132 bytes |
+| Setup `.exe` | 245 s, 1,491,505,188 bytes | 58 s, 3,179,586,136 bytes |
 | `--version` (unpacks the payload first) | seconds | 17 s warm; 2m08s for the first run |
-| Silent install | seconds | 2m18s |
+| Silent install | seconds | under two minutes (1m58s-2m18s) |
 
 The full setup is one 3.0 GiB file that unpacks to 4.8 GiB, and installing is
-mostly writing those 4.8 GiB. The app it installs was then started with
+mostly writing those 4.8 GiB, in about two minutes. The app it installs was then started with
 `--self-test` (*"dashboard self-test OK"*), and `--job talk.wav --align
 --translate-to fr` on the installed copy wrote `captions.srt`, `captions.vtt`,
 `captions.fr.srt` and `captions.fr.vtt` - a real aligned and translated job,

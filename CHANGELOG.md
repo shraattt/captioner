@@ -32,7 +32,7 @@ measured on the development machine (RTX 4050 laptop, 6 GB VRAM, i5-12450HX,
   `.zip` (3,721,194,486 bytes in ~13 min) and embeds that single archive,
   telling PyInstaller to store it instead of deflating it a second time; the
   setup then builds in 61 s and comes out **3,809,148,020 bytes** (4.8 GiB /
-  3,179,586,132 bytes after the duplicate-CUDA fix below). The archive
+  3,179,586,136 bytes after the duplicate-CUDA fix below). The archive
   is reused as the portable download, and a payload older than the folder is
   recompressed rather than trusted. `scripts/installer.py` unpacks it at
   install time, dropping the archive's `Captioner/` level; a compressed payload
@@ -41,7 +41,7 @@ measured on the development machine (RTX 4050 laptop, 6 GB VRAM, i5-12450HX,
   GiB to install"* and the full-build note; a silent install from a *relative*
   `--target` now resolves it (it used to write that relative path into `.env`,
   which the app would have read from its own folder) and writes 4.8 GiB in
-  2m18s; the installed copy passes `--self-test` and captions a real file
+  about two minutes; the installed copy passes `--self-test` and captions a real file
   with `--align --translate-to fr`; `--uninstall` removed all of it. First run
   with an empty Hugging Face cache downloaded 2.2 GB - Whisper `tiny.en` 75 MB,
   wav2vec2 360 MB, M2M100 1.9 GB - and took 20 minutes for a 14 s clip; the
@@ -338,8 +338,8 @@ measured on the development machine (RTX 4050 laptop, 6 GB VRAM, i5-12450HX,
   when torch has them; a slim build still packs them, because it has no torch
   to borrow them from. Measured here: the installed folder went 6,076,335,467
   -> **5,117,865,752 bytes (4.8 GiB)**, the portable `.zip` 3,721,194,486 ->
-  **3,091,725,066**, and the setup `.exe` 3,809,148,020 -> **3,179,586,132
-  bytes (3.0 GiB)**, built in 73 s. The frozen artifact was then run, not
+  **3,091,725,066**, and the setup `.exe` 3,809,148,020 -> **3,179,586,136
+  bytes (3.0 GiB)**, built in 58 s. The frozen artifact was then run, not
   imported: a 14 s clip with `--align --translate-to fr` finished in 34.7 s on
   the GPU and wrote all four caption files, and `--version` answers *"Captioner
   0.7.0, 4.8 GiB to install"*.
