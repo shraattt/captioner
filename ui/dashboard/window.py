@@ -38,16 +38,24 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 
-from captioner import config, db, worker
+from captioner import config, db, features, worker
+from captioner.languages import SPOKEN_LANGUAGES, spoken_name
 from captioner.translate import LANGUAGES
 
 from .constants import APP_NAME, APP_VERSION, COLUMNS, MODEL_CHOICES
 from .formatting import _expand_media
 from .jobs import JobQueueMixin
 from .live import LiveMixin
+from .preferences import Preferences, PreferencesDialog
 from .preview import PreviewMixin
 from .services import ServiceMixin
-from .theme import _QSS, _STATUS_COLORS_DARK, _STATUS_COLORS_LIGHT, _TEXT_FAINT
+from .theme import (
+    apply_theme,
+    faint_style,
+    is_dark,
+    px,
+    status_colors,
+)
 from .widgets import PlaybackControls
 from .worker import WorkerMixin, WorkerThread
 
@@ -57,15 +65,26 @@ logger = logging.getLogger(__name__)
 class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixin, QMainWindow):
     """The batch captioning window."""
 
-    def __init__(self, conn=None, persist_settings: bool = True):
+    def __init__(self, conn=None, persist_settings: bool = True, settings=None):
+        """``settings`` overrides where preferences are stored (tests point it
+        at a temporary file); ``persist_settings=False`` keeps everything in
+        memory and never writes to the user's registry."""
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} — batch captions")
         self.resize(1040, 720)
         self.setAcceptDrops(True)
-        self.setStyleSheet(_QSS)
 
         self.conn = conn if conn is not None else db.connect()
-        self.settings = QSettings("captioner", "dashboard") if persist_settings else None
+        if settings is not None:
+            self.settings = settings
+        else:
+            self.settings = QSettings("captioner", "dashboard") if persist_settings else None
+        # Appearance, accessibility and the queue defaults the user chose last
+        # time; applied before the widgets are built so the first paint already
+        # uses the right theme, text size and option values.
+        self.prefs = Preferences.load(self.settings, model_default=config.BATCH_MODEL_SIZE)
+        self._theme_labels: list = []  # labels whose style follows the theme
+        self.apply_preferences()
         self.worker_thread: WorkerThread | None = None
         self._signature = None
         self._pending_before = 0
@@ -99,6 +118,8 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         self.timer.timeout.connect(self.refresh)
         self.timer.start(1000)
         self.refresh()
+        if self.prefs.autostart:
+            self.start_worker()
         if self.recovered:
             self.statusBar().showMessage(
                 f"recovered {self.recovered} job(s) a crashed worker left running — "
@@ -179,6 +200,14 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
             "Ctrl+Shift+Z",
             self.revert_caption_edits,
             "Throw away unsaved caption edits",
+        )
+        job_menu.addSeparator()
+        self._add_action(
+            job_menu,
+            "&Translate selection…",
+            "Ctrl+T",
+            self.translate_selected,
+            "Write subtitles in another language, without transcribing again",
         )
         job_menu.addSeparator()
         self._add_action(job_menu, "&Open output folder", "Ctrl+E", self.open_output)
@@ -285,6 +314,47 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
                 logger.warning("global hotkey unavailable: %s", exc)
                 self._hotkey = None
 
+        view_menu = self.menuBar().addMenu("&View")
+        self._add_action(
+            view_menu,
+            "&Appearance and accessibility…",
+            "Ctrl+,",
+            self.open_preferences,
+            "Theme, text size and quiet mode",
+        )
+        view_menu.addSeparator()
+        self._add_action(
+            view_menu,
+            "&Larger text",
+            "Ctrl+=",
+            lambda: self.nudge_text_size(0.1),
+            "Scale the whole interface up by 10%",
+        )
+        self._add_action(
+            view_menu,
+            "&Smaller text",
+            "Ctrl+-",
+            lambda: self.nudge_text_size(-0.1),
+            "Scale the whole interface down by 10%",
+        )
+        self._add_action(
+            view_menu,
+            "&Normal text size",
+            "Ctrl+0",
+            self.reset_text_size,
+            "Back to 100%",
+        )
+        view_menu.addSeparator()
+        self.act_contrast = self._add_action(
+            view_menu,
+            "&High contrast theme",
+            "Ctrl+Shift+H",
+            self.toggle_contrast,
+            "Opaque surfaces, brighter text, stronger focus rings",
+        )
+        self.act_contrast.setCheckable(True)
+        self.act_contrast.setChecked(self.prefs.theme == "contrast")
+
         tools_menu = self.menuBar().addMenu("&Tools")
         self.act_api = self._add_action(
             tools_menu,
@@ -295,6 +365,13 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         )
 
         help_menu = self.menuBar().addMenu("&Help")
+        self._add_action(
+            help_menu,
+            "&Keyboard shortcuts",
+            "F1",
+            self.show_shortcuts,
+            "Every shortcut, and what it does",
+        )
         self._add_action(help_menu, "&About", None, self.show_about)
 
     def _build_central(self) -> None:
@@ -311,11 +388,19 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         self.btn_add.setToolTip(
             "Queue media files for captioning (Ctrl+O) — or just drop them anywhere in this window"
         )
+        self.btn_add.setAccessibleName("Add files")
+        self.btn_add.setAccessibleDescription(
+            "Queue media files for captioning. Shortcut Control O."
+        )
         self.btn_add.clicked.connect(self.add_files)
         header.addWidget(self.btn_add)
 
         self.btn_worker = QPushButton("▶  Start worker")
-        self.btn_worker.setToolTip("Process queued jobs inside this window (Ctrl+R shows retry)")
+        self.btn_worker.setToolTip("Process queued jobs inside this window")
+        self.btn_worker.setAccessibleName("Start or stop the worker")
+        self.btn_worker.setAccessibleDescription(
+            "Processes queued jobs inside this window. Turns into Stop worker while running."
+        )
         self.btn_worker.clicked.connect(self.toggle_worker)
         header.addWidget(self.btn_worker)
 
@@ -330,7 +415,11 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         # Secondary options tuck into a settings popover (a QMenu of widgets).
         self.btn_options = QPushButton("⚙  Options")
         self.btn_options.setProperty("secondary", True)
-        self.btn_options.setToolTip("Model, speakers, watch folder, notifications")
+        self.btn_options.setAccessibleName("Options for newly added files")
+        self.btn_options.setToolTip(
+            "Model, spoken language, translation, speakers, watch folder, "
+            "notifications (Alt+O)"
+        )
         options_menu = QMenu(self.btn_options)
         self._options = QWidgetAction(options_menu)
         panel = QWidget()
@@ -341,13 +430,11 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         model_row = QHBoxLayout()
         model_row.setSpacing(8)
         model_label = QLabel("Model")
-        model_label.setStyleSheet(f"color: {_TEXT_FAINT};")
+        self._style_faint(model_label)
         self.model_combo = QComboBox()
         self.model_combo.addItems(MODEL_CHOICES)
-        preferred = (
-            config.BATCH_MODEL_SIZE if config.BATCH_MODEL_SIZE in MODEL_CHOICES else "medium"
-        )
-        self.model_combo.setCurrentText(preferred)
+        self.model_combo.setCurrentText(self.prefs.model)
+        self.model_combo.setAccessibleName("Model for newly added files")
         self.model_combo.setToolTip(
             "Model used for newly added files.\n"
             "tiny = fast draft (~8× realtime) · small/medium = accurate "
@@ -360,7 +447,39 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         model_row.addWidget(self.model_combo)
         form.addLayout(model_row)
 
+        language_row = QHBoxLayout()
+        language_row.setSpacing(8)
+        language_label = QLabel("Spoken language")
+        self._style_faint(language_label)
+        self.language_combo = QComboBox()
+        self.language_combo.addItem("Detect automatically", "")
+        for code, name in sorted(SPOKEN_LANGUAGES.items(), key=lambda kv: (kv[1], kv[0])):
+            self.language_combo.addItem(f"{name} ({code})", code)
+        index = self.language_combo.findData(self.prefs.language)
+        if index > 0:
+            self.language_combo.setCurrentIndex(index)
+        self.language_combo.setAccessibleName("Spoken language of new files")
+        self.language_combo.setToolTip(
+            f"What language is spoken in the recording, for newly added files "
+            f"({len(SPOKEN_LANGUAGES)} are recognised).\n"
+            "Detecting is the default and is right almost always; naming it\n"
+            "skips the detection step and is more accurate for a language\n"
+            "Whisper might confuse with another - and it is what tells the\n"
+            "translator what it is reading."
+        )
+        self.language_combo.setMinimumWidth(190)
+        language_row.addWidget(language_label)
+        language_row.addWidget(self.language_combo)
+        self.language_hint = QLabel("")
+        self.language_hint.setWordWrap(True)
+        self._style_faint(self.language_hint)
+        self.language_hint.hide()
+        form.addLayout(language_row)
+        form.addWidget(self.language_hint)
+
         self.diarize_check = QCheckBox("Identify speakers")
+        self.diarize_check.setChecked(self.prefs.diarize)
+        self.diarize_check.setAccessibleName("Identify speakers")
         self.diarize_check.setToolTip(
             "Label caption lines with speakers ([SPEAKER_00]: …) using pyannote.\n"
             "Applies to newly added files; adds a diarization pass per job\n"
@@ -369,6 +488,8 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         form.addWidget(self.diarize_check)
 
         self.align_check = QCheckBox("Align word timings (wav2vec2)")
+        self.align_check.setChecked(self.prefs.align)
+        self.align_check.setAccessibleName("Align word timings with wav2vec2")
         self.align_check.setToolTip(
             "Re-time every word with a character alignment model before the\n"
             "captions are grouped — sharper subtitle in/out points than\n"
@@ -379,23 +500,40 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
 
         translate_row = QHBoxLayout()
         translate_row.setSpacing(8)
-        translate_label = QLabel("Translate captions")
-        translate_label.setStyleSheet(f"color: {_TEXT_FAINT};")
+        self.translate_label = self._style_faint(QLabel("Translate captions"))
         self.translate_combo = QComboBox()
         self.translate_combo.addItem("Off", "")
-        for code, name in sorted(LANGUAGES.items(), key=lambda kv: kv[1]):
+        for code, name in sorted(LANGUAGES.items(), key=lambda kv: (kv[1], kv[0])):
             self.translate_combo.addItem(f"{name} ({code})", code)
+        index = self.translate_combo.findData(self.prefs.translate_to)
+        if index > 0:
+            self.translate_combo.setCurrentIndex(index)
+        self.translate_combo.setAccessibleName("Translate new captions into")
         self.translate_combo.setToolTip(
-            "Also write captions.<language>.srt/.vtt for newly added files.\n"
+            f"Also write captions.<language>.srt/.vtt for newly added files "
+            f"({len(LANGUAGES)} languages).\n"
             "Each unique line is translated once and cached, so re-running a\n"
-            "job costs nothing. First use downloads ~2.4 GB."
+            "job costs nothing. First use downloads ~2.4 GB.\n"
+            "The transcript is read as the spoken language above, so a Hindi\n"
+            "recording can go straight to French."
         )
-        self.translate_combo.setMinimumWidth(170)
-        translate_row.addWidget(translate_label)
+        self.translate_combo.setMinimumWidth(190)
+        translate_row.addWidget(self.translate_label)
         translate_row.addWidget(self.translate_combo)
         form.addLayout(translate_row)
 
+        # A build can be missing what an option needs (the slim installer leaves
+        # PyTorch out on purpose). Say so on the control instead of letting a job
+        # discover it: a disabled switch with the reason in its label and tooltip
+        # is a feature list, a job that fails in a log is a support ticket.
+        self._mark_unavailable(self.diarize_check, "speakers")
+        self._mark_unavailable(self.align_check, "align")
+        self._mark_unavailable(self.translate_combo, "translate_local",
+                               label_widget=self.translate_label)
+
         self.watch_check = QCheckBox("Watch uploads folder")
+        self.watch_check.setChecked(self.prefs.watch)
+        self.watch_check.setAccessibleName("Watch the uploads folder")
         self.watch_check.setToolTip(
             "Automatically queue media that appears in the uploads folder "
             f"({config.UPLOADS_DIR}).\n"
@@ -403,9 +541,20 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         )
         form.addWidget(self.watch_check)
         self.notify_check = QCheckBox("Notify when done")
-        self.notify_check.setChecked(True)
-        self.notify_check.setToolTip("Beep and flash the taskbar entry when the queue drains")
+        self.notify_check.setChecked(self.prefs.notify)
+        self.notify_check.setAccessibleName("Notify when the queue finishes")
+        self.notify_check.setToolTip(
+            "Beep and flash the taskbar entry when the queue drains.\n"
+            "Quiet mode in Appearance and accessibility… turns this off \n"
+            "for good."
+        )
         form.addWidget(self.notify_check)
+        self._wire_option_persistence()
+        if features.unavailable():
+            # A remembered option from a different install (or a different
+            # machine) must not stay in the preferences pointing at a feature
+            # that is not here.
+            self._persist_queue_defaults()
         self._options.setDefaultWidget(panel)
         options_menu.addAction(self._options)
         self._options_menu = options_menu
@@ -427,10 +576,10 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         self.progress.setFixedHeight(6)
         self.progress.setTextVisible(False)
         self.progress.setToolTip("Settled jobs (done + error) out of everything in the queue")
+        self.progress.setAccessibleName("Queue progress")
         self.counts_label = QLabel("")
-        self.counts_label.setStyleSheet(
-            f"color: {_TEXT_FAINT}; font-size: 12px; background: transparent;"
-        )
+        self._style_faint(self.counts_label, extra=f"font-size: {px(12)}; ")
+        self.counts_label.setAccessibleName("Queue counts")
         summary.addWidget(self.progress, stretch=1)
         summary.addWidget(self.counts_label)
         col.addLayout(summary)
@@ -449,6 +598,10 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.setWordWrap(False)
+        self.table.setAccessibleName("Job queue")
+        self.table.setAccessibleDescription(
+            "One row per job. Use the arrow keys to move, Retry and Delete from the Job menu."
+        )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -480,6 +633,10 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
             "Drop media files or folders anywhere in this window, or press Ctrl+O.\n"
             "Select a finished job to read (and fix) its captions here."
         )
+        self.preview.setAccessibleName("Captions of the selected job")
+        self.preview.setAccessibleDescription(
+            "Editable captions. Control S saves your edits, Control Shift Z discards them."
+        )
         self.preview.textChanged.connect(self._on_preview_edited)
         dcol.addWidget(self.preview, stretch=1)
 
@@ -508,13 +665,24 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         self.btn_save_edits.setToolTip(
             "Rewrite captions.srt and captions.vtt with your edited text (Ctrl+S)"
         )
+        self.btn_save_edits.setAccessibleName("Save caption edits")
         self.btn_save_edits.clicked.connect(self.save_caption_edits)
         self.btn_revert_edits = QPushButton("Revert")
         self.btn_revert_edits.setProperty("secondary", True)
         self.btn_revert_edits.setToolTip("Throw away unsaved caption edits (Ctrl+Shift+Z)")
+        self.btn_revert_edits.setAccessibleName("Discard caption edits")
         self.btn_revert_edits.clicked.connect(self.revert_caption_edits)
         btns.addWidget(self.btn_save_edits)
         btns.addWidget(self.btn_revert_edits)
+        self.btn_translate = QPushButton("Translate…")
+        self.btn_translate.setProperty("secondary", True)
+        self.btn_translate.setToolTip(
+            "Write captions.<language>.srt/.vtt for the selected job without\n"
+            "transcribing it again (also in the Job menu)"
+        )
+        self.btn_translate.setAccessibleName("Translate the selected job")
+        self.btn_translate.clicked.connect(self.translate_selected)
+        btns.addWidget(self.btn_translate)
         dcol.addLayout(btns)
 
         splitter.addWidget(details)
@@ -525,14 +693,196 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         col.addWidget(self.player_controls)  # docked at the bottom
 
         self.setCentralWidget(central)
+        # A predictable keyboard path: header actions, then the queue, then the
+        # captions, then the buttons under them, then the player.
+        for first, second in (
+            (self.btn_add, self.btn_worker),
+            (self.btn_worker, self.btn_options),
+            (self.btn_options, self.table),
+            (self.table, self.preview),
+            (self.preview, self.btn_save_edits),
+            (self.btn_save_edits, self.btn_revert_edits),
+            (self.btn_revert_edits, self.btn_translate),
+            (self.btn_translate, self.player_controls),
+        ):
+            self.setTabOrder(first, second)
 
     def _build_status_bar(self) -> None:
         bar = QStatusBar()
         self.setStatusBar(bar)
         self.paths_label = QLabel(f"outputs: {config.OUTPUT_DIR}")
         self.paths_label.setToolTip(f"database: {config.DB_PATH}\noutputs: {config.OUTPUT_DIR}")
+        self.paths_label.setAccessibleName(f"Output folder: {config.OUTPUT_DIR}")
         bar.addPermanentWidget(self.paths_label)
         bar.showMessage("Ready — add a file to caption.")
+        # The status bar is the live region of this window: it is where every
+        # long-running action reports itself, so a screen reader follows it.
+        bar.setAccessibleName("Status")
+
+    #preferences, appearance and accessibility
+
+    def _style_faint(self, label: QLabel, extra: str = "") -> QLabel:
+        """Give a label the theme's muted colour and remember it for re-theming."""
+        label.setStyleSheet(faint_style(extra))
+        self._theme_labels.append((label, extra))
+        return label
+
+    def apply_preferences(self) -> None:
+        """Apply the theme, the text scale and the queue defaults.
+
+        Called at startup, whenever the shortcuts change something, and live
+        from the preferences dialog as the user drags the text-size slider.
+        """
+        self.setStyleSheet(apply_theme(self.prefs.theme, self.prefs.text_scale))
+        for label, extra in getattr(self, "_theme_labels", []):
+            label.setStyleSheet(faint_style(extra))
+        action = getattr(self, "act_contrast", None)
+        if action is not None:
+            action.setChecked(self.prefs.theme == "contrast")
+        self._update_language_hint()
+        # Deliberately no save here: this runs on every repaint, including the
+        # live preview inside the preferences dialog, where Cancel has to be
+        # able to put everything back. The option widgets save when they change.
+
+    def nudge_text_size(self, delta: float) -> None:
+        """Scale the interface up or down (Ctrl+= / Ctrl+-)."""
+        self.apply_preferences_with_scale(self.prefs.scale_text(delta))
+
+    def reset_text_size(self) -> None:
+        self.prefs.reset_text_scale()
+        self.apply_preferences_with_scale("100%")
+
+    def apply_preferences_with_scale(self, label: str) -> None:
+        """Repaint after a change made outside the dialog, then say so."""
+        self.apply_preferences()
+        self.statusBar().showMessage(f"text size {label}", 3000)
+
+    def toggle_contrast(self) -> None:
+        """Ctrl+Shift+H: high contrast on or off."""
+        name = self.prefs.toggle_contrast()
+        self.apply_preferences()
+        self.statusBar().showMessage(f"{name} theme", 3000)
+
+    def open_preferences(self) -> None:
+        """Ctrl+,: appearance and accessibility, previewed live."""
+        dialog = PreferencesDialog(self.prefs, self)
+        dialog.exec()
+        self.apply_preferences()
+
+    SHORTCUTS = (
+        ("Ctrl+O", "Add files"),
+        ("Ctrl+Shift+O", "Add a folder"),
+        ("Ctrl+R", "Retry the selected job"),
+        ("Delete", "Remove the selected job from the queue"),
+        ("Ctrl+S", "Save caption edits"),
+        ("Ctrl+Shift+Z", "Discard caption edits"),
+        ("Ctrl+E", "Open the output folder"),
+        ("Ctrl+T", "Translate the selected job"),
+        ("Space", "Play or pause the preview"),
+        ("Ctrl+.", "Stop playback"),
+        ("Ctrl+Left / Ctrl+Right", "Seek 5 seconds"),
+        ("Ctrl+M", "Mute the preview"),
+        ("Ctrl+Alt+Y", "Toggle live captions"),
+        ("Ctrl+,", "Appearance and accessibility"),
+        ("Ctrl+= / Ctrl+-", "Larger / smaller text"),
+        ("Ctrl+0", "Normal text size"),
+        ("Ctrl+Shift+H", "High contrast theme"),
+        ("Alt+O", "Open the Options popover"),
+        ("Tab / Shift+Tab", "Move between controls"),
+        ("F1", "This list"),
+    )
+
+    def show_shortcuts(self) -> None:
+        """F1: the keyboard map, in a dialog small enough to read."""
+        rows = "".join(
+            f"<tr><td style='padding:2px 14px 2px 0'><b>{key}</b></td>"
+            f"<td style='padding:2px 0'>{text}</td></tr>"
+            for key, text in self.SHORTCUTS
+        )
+        box = QMessageBox(self)
+        box.setWindowTitle("Keyboard shortcuts")
+        box.setTextFormat(Qt.TextFormat.RichText)
+        box.setText(f"<b>Keyboard shortcuts</b><table>{rows}</table>")
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.exec()
+
+    def _mark_unavailable(self, control, extra_key: str, label_widget=None) -> None:
+        """Grey out an option this build cannot run, and explain it in place.
+
+        The feature keeps its own name (so it is still searchable, and a screen
+        reader still reads the feature rather than a footnote), with the reason
+        after it: *not in this build*. The tooltip then says which packages are
+        missing, what happens instead, and how to install them.
+        """
+        extra = features.find(extra_key)
+        if features.available(extra):
+            return
+        text = features.label(extra)
+        if isinstance(control, QCheckBox):
+            control.setChecked(False)
+            control.setText(text)
+        elif label_widget is not None:
+            label_widget.setText(text)
+        if isinstance(control, QComboBox):
+            control.setCurrentIndex(0)   # "Off": a job must not ask for it
+        control.setEnabled(False)
+        control.setToolTip(features.tooltip(extra, control.toolTip()))
+        control.setAccessibleName(text)
+        control.setAccessibleDescription(features.tooltip(extra, ""))
+
+    def _wire_option_persistence(self) -> None:
+        """Every option control saves its value as soon as it changes.
+
+        The options double as defaults for the next file, so remembering them
+        is the whole point: the popover is a preference editor that happens to
+        also apply to the current drop.
+        """
+        self.model_combo.currentTextChanged.connect(self._persist_queue_defaults)
+        self.language_combo.currentIndexChanged.connect(self._on_language_changed)
+        self.translate_combo.currentIndexChanged.connect(self._persist_queue_defaults)
+        self.diarize_check.toggled.connect(self._persist_queue_defaults)
+        self.align_check.toggled.connect(self._persist_queue_defaults)
+        self.watch_check.toggled.connect(self._persist_queue_defaults)
+        self.notify_check.toggled.connect(self._persist_queue_defaults)
+
+    def _on_language_changed(self) -> None:
+        self._update_language_hint()
+        self._persist_queue_defaults()
+
+    def _update_language_hint(self) -> None:
+        """Say so when the spoken language cannot be translated.
+
+        The recogniser knows 100 languages and the translator another 100; the
+        overlap is smaller than either. Telling the user before they queue a
+        file beats a job that finishes with a note instead of a translation.
+        """
+        hint = getattr(self, "language_hint", None)
+        if hint is None:
+            return
+        code = self.language_combo.currentData() or ""
+        target = self.translate_combo.currentData() or ""
+        if code and target and code not in LANGUAGES:
+            hint.setText(
+                f"{spoken_name(code)} can be transcribed, but the translator has no "
+                f"{spoken_name(code)} model yet - set Spoken language to a language it "
+                "knows, or leave the translation off."
+            )
+            hint.show()
+        else:
+            hint.hide()
+
+    def _persist_queue_defaults(self) -> None:
+        """Copy the Options popover into the preferences and save them."""
+        if not hasattr(self, "model_combo"):
+            return
+        self.prefs.model = self.model_combo.currentText()
+        self.prefs.language = self.language_combo.currentData() or ""
+        self.prefs.translate_to = self.translate_combo.currentData() or ""
+        self.prefs.diarize = self.diarize_check.isChecked()
+        self.prefs.align = self.align_check.isChecked()
+        self.prefs.watch = self.watch_check.isChecked()
+        self.prefs.notify = self.notify_check.isChecked()
+        self.prefs.save()
 
     def _restore_geometry(self) -> None:
         if self.settings is None:
@@ -545,13 +895,21 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
             self.splitter.restoreState(state)
 
     def _is_dark(self) -> bool:
+        """Today's answer comes from the theme, not from the palette guess."""
+        if self.prefs is not None:
+            return is_dark(self.prefs.theme)
         return self.palette().color(QPalette.ColorRole.Window).lightness() < 128
 
     def _status_color(self, status: str) -> QColor:
-        palette = _STATUS_COLORS_DARK if self._is_dark() else _STATUS_COLORS_LIGHT
-        return QColor(palette.get(status, "#888888"))
+        return QColor(status_colors().get(status, "#888888"))
 
-    def show_about(self) -> None:
+    def about_text(self) -> str:
+        """The body of Help → About: identity, versions, this build, paths.
+
+        Kept as a function rather than built inside the dialog so a test can
+        read it without opening a modal, and so the title card and the dialog
+        credit the same project.
+        """
         try:
             import PySide6
 
@@ -564,16 +922,21 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
             whisper = faster_whisper.__version__
         except Exception:  # pragma: no cover - version display only
             whisper = "?"
-        QMessageBox.about(
-            self,
-            f"About {APP_NAME}",
-            f"<b>{APP_NAME}</b> — local AI captions: batch + live + speakers<p>"
+        return (
+            f"<b>{APP_NAME}</b> — local AI captions: batch + live + speakers<br>"
+            f"<span style='{faint_style()}'>project by sharat</span><p>"
             f"version {APP_VERSION} · PySide6 {pyside} · faster-whisper {whisper}<br>"
             f"batch model default: {config.BATCH_MODEL_SIZE} · "
             f"live model default: {config.LIVE_MODEL_SIZE}"
+            # What this build is, not just what the project can do: the two
+            # differ on purpose (see captioner/features.py).
+            f"<p>{features.summary()}"
             f"<p>database: {config.DB_PATH}<br>outputs: {config.OUTPUT_DIR}<br>"
-            f"log: {config.DATA_DIR / 'logs' / 'captioner.log'}",
+            f"log: {config.DATA_DIR / 'logs' / 'captioner.log'}"
         )
+
+    def show_about(self) -> None:
+        QMessageBox.about(self, f"About {APP_NAME}", self.about_text())
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
@@ -617,5 +980,6 @@ class Dashboard(JobQueueMixin, PreviewMixin, LiveMixin, WorkerMixin, ServiceMixi
         if self.settings is not None:
             self.settings.setValue("geometry", self.saveGeometry())
             self.settings.setValue("splitter", self.splitter.saveState())
+        self._persist_queue_defaults()  # last chance to remember the options
         self.conn.close()
         super().closeEvent(event)

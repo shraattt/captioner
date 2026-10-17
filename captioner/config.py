@@ -1,25 +1,79 @@
 """Central configuration for the captioner app.
 
-All paths are relative to the project root (the folder containing this
-package) and are created on demand. Keeping every knob in one module means
-the UI, worker, and tests all agree on where things live.
+Every path the app writes is decided here and created on demand, so the UI, the
+worker, the CLI and the tests all agree on where things live. Run from a
+checkout, they live in its `data/` folder; run from a packaged build, they live
+in the user's profile - see `data_home` for why that has to be different.
 """
 import os
+import sys
 from pathlib import Path
 
+#Secrets, read before anything else
+# The `.env` file is loaded *here*, first, because it can decide where the app
+# keeps its data (`CAPTIONER_DATA_DIR`) - and DATA_DIR below is fixed at import,
+# so reading the file any later would be too late. A portable install is exactly
+# that: a `.env` beside the executable, pointing the data folder at the stick it
+# travels on. Real environment variables always win over the file.
+try:
+    from . import secrets as _secrets
+except ImportError:  # pragma: no cover - top-level run path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from secrets import secrets as _secrets  # type: ignore
+
+_secrets.load_env_file()
+
 #Layout
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = PROJECT_ROOT / "data"
+# Where the code lives, and with it the files that ship beside it (the icon,
+# `ui/web`). Under PyInstaller that is the folder the build was unpacked into,
+# which is what `sys._MEIPASS` names; from a checkout it is the parent of this
+# package. Nothing here is writable in a packaged install, which is why no path
+# below this line is derived from it except PROJECT_ROOT itself.
+PROJECT_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
+
+
+def frozen() -> bool:
+    """Is this a packaged build, with no Python and no checkout around it?"""
+    return bool(getattr(sys, "frozen", False))
+
+
+def data_home() -> Path:
+    """The folder the app writes to: database, outputs, logs, fine-tuned models.
+
+    Development keeps the checkout's `data/`, so every script and every line of
+    the documentation still points where it always did. A packaged build must
+    *not* write beside its own executable: that is Program Files (needs
+    elevation) and, worse, a folder an uninstall or a repair may delete -
+    the user's jobs and transcripts would go with it. So a packaged build keeps
+    its data in the per-user profile, and `CAPTIONER_DATA_DIR` moves it anywhere
+    (a portable stick, a second profile, a network share).
+    """
+    override = os.environ.get("CAPTIONER_DATA_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if frozen():
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        return (Path(base) if base else Path.home()) / "Captioner" / "data"
+    return PROJECT_ROOT / "data"
+
+
+DATA_DIR = data_home()
 UPLOADS_DIR = DATA_DIR / "uploads"
 OUTPUT_DIR = DATA_DIR / "outputs"
 DB_PATH = DATA_DIR / "captioner.db"
 
 #Models
-# Batch uses the accurate-but-slow model; live (later phase) uses tiny.
+# Batch uses the accurate-but-slow model; live uses the smallest one that
+# still hears the words (see the LIVE_MODEL_SIZE note below).
 # distil-large-v3: medium's accuracy measured at ~2.4x its speed on the
 # RTX 4050, weights ~1.5GB (see scripts/model_sweep.py for the comparison).
 BATCH_MODEL_SIZE = "distil-large-v3"
-LIVE_MODEL_SIZE = "tiny.en"  # live captions need latency, not accuracy
+# Live needs latency, not accuracy - but tiny.en was measurably *too* small.
+# On two real lecture recordings (README, "On real audio") it disagreed with
+# the batch transcript on 28% / 23% of words and small.en on 15% / 14%, for
+# twice the decode cost that still fits the 1.5s stride (p95 1.05-1.32s).
+# Live -> Live model still offers tiny.en for a machine that cannot keep up.
+LIVE_MODEL_SIZE = "small.en"
 
 # Phase 4/5: fine-tuned checkpoints converted to CTranslate2 land in
 # data/ft/<name>_ct2 and are offered by captioner/models.py automatically.
@@ -54,22 +108,9 @@ def ensure_dirs() -> None:
 
 
 #Secrets
-# Hugging Face token for gated model downloads (Phase 2 diarization). Loaded
-# from the project-local .env (gitignored) so the token never has to be
-# committed or hardcoded. The file is parsed by captioner.secrets and is
-# only read once per variable.
-try:
-    from . import secrets as _secrets
-except ImportError:  # pragma: no cover - top-level run path
-    import sys
-    from pathlib import Path
-
-    _project_root = Path(__file__).resolve().parent.parent
-    if str(_project_root) not in sys.path:
-        sys.path.insert(0, str(_project_root))
-    from secrets import secrets as _secrets  # type: ignore
-
-
+# Hugging Face token for gated model downloads (Phase 2 diarization). The file
+# itself was read at the top of this module (it can move the data folder); these
+# are the accessors the rest of the app uses.
 def hf_token() -> str:
     """Return the Hugging Face token (loaded from .env on first call)."""
     load_env_file()

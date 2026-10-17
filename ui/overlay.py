@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
@@ -65,13 +66,95 @@ FONT_RANGE = (11, 24)
 WIDTH_RANGE = (420, 1400)
 
 
+SOUND_POLL_SECONDS = 0.05  # how often a paused loop listens for the speaker
+
+
+def stride_wait(stride: float, spent: float) -> float:
+    """How long to wait after a decode that took *spent* seconds.
+
+    The stride is a period, not a nap: the loop wants a decode roughly every
+    STRIDE_SECONDS of audio, so whatever the decode itself cost comes out of
+    the wait. Sleeping the full stride *after* the decode instead runs the
+    loop at decode + stride (about 1.8 s for tiny.en, 2.6 s for small.en),
+    which slides the window further between refreshes and puts every caption
+    that much later.
+    """
+    period = min(max(stride, 0.5), IDLE_STRIDE_SECONDS)
+    return max(0.1, period - spent)
+
+
+def wait_for_sound(stop: threading.Event, level_of, wake_level: float | None,
+                   timeout: float, poll: float = SOUND_POLL_SECONDS) -> bool:
+    """Wait out *timeout*, but return as soon as the microphone hears speech.
+
+    The wait between decodes is a period, and during a pause that period is
+    IDLE_STRIDE_SECONDS - chosen because there is apparently nothing to
+    transcribe. The speaker coming back is new information, and sleeping the
+    rest of the idle stride over it means the resumed words wait out a nap
+    nobody needed: up to three seconds of captions that are late for no reason.
+
+    The capture thread already measures every audio block, so listening costs
+    an attribute read every `poll` seconds, against the ~0.5 s decode that
+    ends the wait. `poll` is well inside the 100 ms the capture itself adds.
+
+    *wake_level* is None while speech is already flowing (the stride is short
+    and must stay short, or a continuous speaker would keep the GPU decoding
+    back to back), which makes this a plain wait. Returns True only when sound
+    cut the wait short.
+    """
+    if wake_level is None:
+        stop.wait(timeout)
+        return False
+    deadline = time.monotonic() + max(0.0, timeout)
+    while not stop.is_set():
+        if float(level_of() or 0.0) >= wake_level:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            return False
+        stop.wait(min(poll, remaining))
+    return False
+
+
+def run_live_session(engine: LiveEngine, capture: MicCapture, stop: threading.Event,
+                     on_state: Callable[[LiveState], None],
+                     on_error: Callable[[str], None]) -> None:
+    """Decode, then wait for the next stride - until *stop* is set.
+
+    Separated from the QThread that normally hosts it so the loop can run with
+    no Qt at all: `scripts/live_resume_audit.py` times this exact loop on a
+    file replay, because the resume wake below is only visible as wall-clock
+    time and a QThread signal would not change that.
+    """
+    while not stop.is_set():
+        started = time.perf_counter()
+        try:
+            state = engine.decode_once(capture)
+        except Exception as exc:
+            logger.exception("live decode failed")
+            on_error(f"decode failed: {exc}")
+            stop.wait(2.0)
+            continue
+        on_state(state)
+        stride = getattr(engine, "suggested_stride", STRIDE_SECONDS)
+        wait_for_sound(
+            stop,
+            lambda: getattr(capture, "sound_level", getattr(capture, "level", 0.0)),
+            getattr(engine, "wake_level", None),
+            stride_wait(stride, time.perf_counter() - started),
+        )
+
+
 class LiveWorker(QThread):
     """Capture + sliding-window decode off the UI thread.
 
     The engine and capture are injectable so tests can run the loop with
     fakes; by default a real `LiveEngine` + `MicCapture` are constructed.
     The loop honors ``engine.suggested_stride`` (short while speech plays,
-    longer during silence), so a live session does not burn GPU on quiet.
+    longer during silence) and ``engine.wake_level`` (the wait after a pause
+    ends the moment the microphone hears the speaker again), so a live
+    session neither burns GPU on quiet nor leaves the first words after a
+    pause waiting out a nap.
     """
 
     state_ready = Signal(object)   # LiveState
@@ -118,17 +201,10 @@ class LiveWorker(QThread):
             # calibrate method and skip this automatically.
             if hasattr(engine, "calibrate"):
                 engine.calibrate(capture)
-            while not stop.is_set():
-                try:
-                    state = engine.decode_once(capture)
-                except Exception as exc:
-                    logger.exception("live decode failed")
-                    self.live_error.emit(f"decode failed: {exc}")
-                    stop.wait(2.0)
-                    continue
-                self.state_ready.emit(state)
-                stride = getattr(engine, "suggested_stride", STRIDE_SECONDS)
-                stop.wait(min(max(stride, 0.5), IDLE_STRIDE_SECONDS))
+            # The loop itself lives in run_live_session so a file replay can
+            # time it without Qt; here it only has to reach the UI signals.
+            run_live_session(engine, capture, stop, self.state_ready.emit,
+                             self.live_error.emit)
         finally:
             if hasattr(capture, "stop"):
                 capture.stop()

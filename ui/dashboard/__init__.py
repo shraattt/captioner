@@ -8,12 +8,14 @@
     preview      caption preview, playback and editing (PreviewMixin)
     live         live caption sessions (LiveMixin)
     worker       the in-app worker thread and its controls (WorkerMixin)
+    splash       the opening card (CAPTIONER / project by sharat)
     window       the Dashboard class that assembles the mixins
 
 Public names are re-exported here, so `from ui.dashboard import Dashboard`
 keeps working whichever module a caller wants. Run it with:
 
-    python -m ui.dashboard                # normal window
+    python -m ui.dashboard                # opening card, then the window
+    python -m ui.dashboard --no-splash    # straight to the window
     python -m ui.dashboard --self-test    # opens and closes itself
 """
 
@@ -67,7 +69,11 @@ def _setup_logging() -> None:
 def main(argv=None) -> int:
     argv = list(sys.argv if argv is None else argv)
     self_test = "--self-test" in argv
-    argv = [a for a in argv if a != "--self-test"]
+    # --no-splash: start straight into the window (a recording, a slow machine,
+    # or someone who simply does not want a title card). Stripped from argv so
+    # Qt does not see it as an option of its own.
+    no_splash = "--no-splash" in argv
+    argv = [a for a in argv if a not in ("--self-test", "--no-splash")]
     if self_test:
         # A sanity run must never claim the system-wide Ctrl+Alt+L for 1.2s.
         os.environ.setdefault("CAPTIONER_NO_GLOBAL_HOTKEY", "1")
@@ -98,12 +104,29 @@ def main(argv=None) -> int:
 
     sys.excepthook = _excepthook
 
+    # The opening card goes up *before* the window is built, so the pause while
+    # the queue is read is covered by something rather than a blank desktop.
+    from .splash import Splash
+    from .splash import enabled as splash_enabled
+
+    splash = None
+    if not (self_test or no_splash) and splash_enabled():
+        splash = Splash()
+        splash.center_on_screen()
+        splash.show()
+        app.processEvents()
+
     try:
         win = Dashboard()
-        win.show()
     except Exception:
+        if splash is not None:
+            splash.close()
         _excepthook(*sys.exc_info())
         return 1
+    if splash is None:
+        win.show()
+    else:
+        splash.finish(win.show)
     if self_test:
         QTimer.singleShot(1200, app.quit)
     code = app.exec()

@@ -135,6 +135,53 @@ def test_unflagged_job_skips_alignment(tmp_db, fake_words, monkeypatch):
     assert called == []
 
 
+def test_translation_reads_the_job_as_the_language_it_was_spoken(tmp_db, fake_words, monkeypatch):
+    """A job queued as Hindi must hand the translator Hindi, not English."""
+    seen = []
+    from captioner import translate as translate_mod
+
+    monkeypatch.setattr(
+        translate_mod.Translator,
+        "translate_many",
+        lambda self, texts, target, source=None: seen.append(source) or [f"[{target}]{t}" for t in texts],
+    )
+    job_id = worker.enqueue(tmp_db, "hindi.mp4", translate_to="fr", source_lang="hi")
+    worker.run_pipeline(tmp_db, worker.claim_next(tmp_db))
+
+    row = tmp_db.execute("SELECT status, error FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert (row["status"], row["error"]) == ("done", None)
+    assert seen == ["hi"]
+
+
+def test_the_detected_language_is_used_when_none_was_given(tmp_db, fake_words, monkeypatch):
+    """Nothing chosen, so what the recogniser heard is what the translator reads."""
+    seen = []
+    from captioner import translate as translate_mod
+
+    monkeypatch.setattr(
+        translate_mod.Translator,
+        "translate_many",
+        lambda self, texts, target, source=None: seen.append(source) or [f"[{target}]{t}" for t in texts],
+    )
+
+    def fake_transcribe(path, size=None, on_progress=None, on_stage=None,
+                        should_cancel=None, language=None, on_language=None):
+        if on_language is not None:
+            on_language("de", 0.9)
+        return fake_words
+
+    monkeypatch.setattr(worker, "transcribe_words", fake_transcribe)
+    job_id = worker.enqueue(tmp_db, "german.mp4", translate_to="fr")
+    worker.run_pipeline(tmp_db, worker.claim_next(tmp_db))
+
+    row = tmp_db.execute(
+        "SELECT status, error, detected_lang FROM jobs WHERE id = ?", (job_id,)
+    ).fetchone()
+    assert (row["status"], row["error"]) == ("done", None)
+    assert row["detected_lang"] == "de"
+    assert seen == ["de"]
+
+
 def test_translate_option_writes_extra_subtitles(tmp_db, fake_words, monkeypatch):
     # Never load the real model here: the pass-through below stands in for it.
     from captioner import translate as translate_mod
@@ -142,7 +189,7 @@ def test_translate_option_writes_extra_subtitles(tmp_db, fake_words, monkeypatch
     monkeypatch.setattr(
         translate_mod.Translator,
         "translate_many",
-        lambda self, texts, target: [f"[{target}]{t}" for t in texts],
+        lambda self, texts, target, source=None: [f"[{target}]{t}" for t in texts],
     )
     job_id = worker.enqueue(tmp_db, "sample.mp4", translate_to="hi")
     job = worker.claim_next(tmp_db)
@@ -178,6 +225,25 @@ def test_claim_is_atomic(tmp_db, fake_words):
     first = worker.claim_next(tmp_db)
     second = worker.claim_next(tmp_db)
     assert first and not second  # a job can only be claimed once
+
+
+def test_a_named_job_can_be_claimed_by_id(tmp_db):
+    """claim_job exists so `--job` runs the file it was given, not the oldest."""
+    first = worker.enqueue(tmp_db, "a.mp4")
+    second = worker.enqueue(tmp_db, "b.mp4")
+
+    claimed = worker.claim_job(tmp_db, second)
+    assert claimed["id"] == second
+    assert claimed["status"] == "running" and claimed["heartbeat_at"]
+    # The older job is untouched, and the named one cannot be claimed twice.
+    assert tmp_db.execute(
+        "SELECT status FROM jobs WHERE id = ?", (first,)
+    ).fetchone()["status"] == "queued"
+    assert worker.claim_job(tmp_db, second) == {}
+
+
+def test_claiming_a_job_that_does_not_exist_is_empty(tmp_db):
+    assert worker.claim_job(tmp_db, 999) == {}
 
 
 def test_error_is_caught_and_recorded(tmp_db, monkeypatch):
@@ -311,7 +377,8 @@ def test_cancel_marks_the_job_canceled_and_writes_nothing(tmp_db, monkeypatch):
     job = worker.claim_next(tmp_db)
     cancel = threading.Event()
 
-    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None):
+    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None,
+             **_):
         cancel.set()
         assert should_cancel is not None and should_cancel() is True
         raise TranscriptionCancelled("canceled by the user")
@@ -333,7 +400,8 @@ def test_canceled_job_can_be_retried(tmp_db, monkeypatch):
     job_id = worker.enqueue(tmp_db, "sample.mp4")
     job = worker.claim_next(tmp_db)
 
-    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None):
+    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None,
+             **_):
         raise TranscriptionCancelled("canceled")
 
     monkeypatch.setattr(worker, "transcribe_words", fake)
@@ -352,7 +420,8 @@ def test_canceled_job_is_not_claimed_again(tmp_db, monkeypatch):
     """Canceling must not turn into a hot loop that re-runs the same job."""
     job_id = worker.enqueue(tmp_db, "sample.mp4")
 
-    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None):
+    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None,
+             **_):
         raise TranscriptionCancelled("canceled")
 
     monkeypatch.setattr(worker, "transcribe_words", fake)
@@ -375,7 +444,8 @@ def test_another_process_can_cancel_a_running_job(tmp_db, monkeypatch):
     job = worker.claim_next(tmp_db)
     elsewhere = db.connect()
 
-    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None):
+    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None,
+             **_):
         assert worker.request_cancel(elsewhere, job_id) == "requested"
         assert should_cancel is not None and should_cancel() is True
         raise TranscriptionCancelled("asked to stop")
@@ -533,7 +603,8 @@ def test_heartbeat_keeps_ticking_while_a_job_is_blocked(tmp_db, monkeypatch):
     job = worker.claim_next(tmp_db)
     beats, stages = [], []
 
-    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None):
+    def fake(path, size, on_progress=None, on_stage=None, should_cancel=None,
+             **_):
         if on_stage is not None:
             on_stage("loading", None)
         deadline = time.time() + 1.6

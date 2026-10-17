@@ -2,10 +2,18 @@
    No build step and no framework, so the page works from the server as-is. */
 "use strict";
 
-const state = { jobs: [], detailId: null, token: localStorage.getItem("captioner.token") || "" };
+const state = {
+  jobs: [],
+  detailId: null,
+  token: localStorage.getItem("captioner.token") || "",
+  // Display scale, so the page stays readable for anyone who needs it bigger.
+  scale: Number(localStorage.getItem("captioner.scale")) || 1,
+  choices: { spoken: [], translation: {} },
+};
 // The API pushes a snapshot when the queue changes; these pace the refetches
 // that follow, so a burst of events cannot turn into a burst of requests.
 const lastFetch = { jobs: 0, header: 0 };
+const SCALES = [0.9, 1, 1.15, 1.3, 1.5, 1.75];
 
 const $ = (id) => document.getElementById(id);
 
@@ -13,9 +21,27 @@ function toast(message, isError) {
   const box = $("toast");
   box.textContent = message;
   box.className = isError ? "error" : "";
+  // Errors are announced immediately; ordinary progress stays polite so it
+  // does not interrupt whatever the screen reader is reading.
+  box.setAttribute("role", isError ? "alert" : "status");
+  box.setAttribute("aria-live", isError ? "assertive" : "polite");
   box.hidden = false;
   clearTimeout(toast._timer);
   toast._timer = setTimeout(() => { box.hidden = true; }, isError ? 7000 : 3500);
+}
+
+function applyScale() {
+  document.documentElement.style.setProperty("--scale", state.scale);
+  $("text-size-value").textContent = Math.round(state.scale * 100) + "% text";
+  $("text-normal").textContent = "A";
+  localStorage.setItem("captioner.scale", state.scale);
+}
+
+function nudgeScale(step) {
+  const index = SCALES.findIndex((value) => Math.abs(value - state.scale) < 0.01);
+  const next = Math.min(SCALES.length - 1, Math.max(0, (index < 0 ? 1 : index) + step));
+  state.scale = SCALES[next];
+  applyScale();
 }
 
 async function api(path, options = {}) {
@@ -37,6 +63,32 @@ function pill(status) {
   return span;
 }
 
+function translationLabel(code) {
+  const name = (state.choices.translation || {})[code];
+  return name ? `${name} (${code})` : code;
+}
+
+function languageCell(job) {
+  // What was heard and what it was turned into. The detected language is shown
+  // even when you named one, so a guess that disagrees with the audio is
+  // visible rather than invisible.
+  const cell = document.createElement("td");
+  cell.className = "small";
+  const parts = [];
+  if (job.source_lang_name || job.detected_lang_name) {
+    parts.push(job.source_lang_name || job.detected_lang_name);
+  }
+  if (job.options && job.options.translate_to) {
+    parts.push("\u2192 " + translationLabel(job.options.translate_to));
+  }
+  cell.textContent = parts.join(" ") || "\u2013";
+  if (job.source_lang_name && job.detected_lang_name &&
+      job.source_lang_name !== job.detected_lang_name) {
+    cell.title = `heard ${job.detected_lang_name}, queued as ${job.source_lang_name}`;
+  }
+  return cell;
+}
+
 function progressCell(job) {
   if (job.status !== "running") {
     return document.createTextNode(job.error ? "error" : (job.stage || ""));
@@ -51,10 +103,12 @@ function progressCell(job) {
   return bar;
 }
 
-function button(text, handler, ghost) {
+function button(text, handler, ghost, label) {
   const element = document.createElement("button");
+  element.type = "button";
   if (ghost) element.className = "ghost";
   element.textContent = text;
+  if (label) element.setAttribute("aria-label", label);
   element.addEventListener("click", handler);
   return element;
 }
@@ -88,6 +142,8 @@ function renderJobs() {
     model.className = "small";
     model.textContent = job.model;
 
+    const language = languageCell(job);
+
     const prog = document.createElement("td");
     prog.appendChild(progressCell(job));
 
@@ -99,24 +155,29 @@ function renderJobs() {
     const actions = document.createElement("td");
     const group = document.createElement("div");
     group.className = "actions";
-    group.appendChild(button("view", () => showDetail(job.id), true));
+    // Screen readers get the file name with each button, not just "view".
+    const label = `job ${job.id} (${job.file_name})`;
+    group.appendChild(button("view", () => showDetail(job.id), true, `view ${label}`));
     if (job.status === "queued" || job.status === "running") {
-      group.appendChild(button("cancel", () => act("cancel", job.id), true));
+      group.appendChild(button("cancel", () => act("cancel", job.id), true,
+                              `cancel ${label}`));
     } else {
-      group.appendChild(button("retry", () => act("retry", job.id), true));
+      group.appendChild(button("retry", () => act("retry", job.id), true,
+                              `retry ${label}`));
     }
     if (job.status !== "running") {
-      group.appendChild(button("delete", () => act("delete", job.id), true));
+      group.appendChild(button("delete", () => act("delete", job.id), true,
+                              `remove ${label}`));
     }
     actions.appendChild(group);
 
-    row.append(id, file, status, model, prog, created, actions);
+    row.append(id, file, status, model, language, prog, created, actions);
     body.appendChild(row);
   }
   if (!state.jobs.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 7;
+    cell.colSpan = 8;
     cell.className = "small";
     cell.textContent = "Nothing queued yet.";
     row.appendChild(cell);
@@ -164,16 +225,29 @@ async function showDetail(jobId) {
       actions.appendChild(button("delete", () => act("delete", job.id), true));
     }
     if (job.captions) {
-      actions.appendChild(button("copy SRT", () => copyCaptions(job.id, "srt"), true));
-      actions.appendChild(button("copy plain text", () => copyCaptions(job.id, "text"), true));
-      actions.appendChild(button("translate…", () => promptTranslate(job.id), true));
+      actions.appendChild(button("copy SRT", () => copyCaptions(job.id, "srt"), true,
+                                 `copy the SRT of job ${job.id}`));
+      actions.appendChild(button("copy plain text", () => copyCaptions(job.id, "text"), true,
+                                 `copy the plain text of job ${job.id}`));
+      actions.appendChild(button("translate\u2026", () => {
+        $("manual-translate").open = true;
+        $("detail-translate").focus();
+      }, true, `translate job ${job.id}`));
     }
 
     const lines = job.caption_blocks.map(
       (block) => `[${(block.start_ms / 1000).toFixed(2)} - ${(block.end_ms / 1000).toFixed(2)}] ${block.text}`
     );
+    const language = [
+      job.source_lang_name ? `spoken:    ${job.source_lang_name}` : "",
+      job.detected_lang_name && job.detected_lang_name !== job.source_lang_name
+        ? `heard:     ${job.detected_lang_name}` : "",
+      job.options && job.options.translate_to
+        ? `translate: to ${translationLabel(job.options.translate_to)}` : "",
+    ].filter(Boolean);
     const header = [
       `model:     ${job.model}`,
+      ...language,
       `created:   ${job.created_at}`,
       `finished:  ${job.finished_at || "-"}`,
       `outputs:   ${job.outputs.join(", ") || "-"}`,
@@ -189,6 +263,7 @@ async function showDetail(jobId) {
 function closeDetail() {
   state.detailId = null;
   $("detail-panel").hidden = true;
+  $("detail-close").focus();
 }
 
 async function copyCaptions(jobId, format) {
@@ -201,10 +276,15 @@ async function copyCaptions(jobId, format) {
   }
 }
 
-async function promptTranslate(jobId) {
-  const target = window.prompt("Translate into which language code? (see /api/languages)", "hi");
-  if (!target) return;
-  toast(`Translating job #${jobId} into ${target}…`);
+async function translateJob(jobId) {
+  const target = $("detail-translate").value;
+  if (!target) {
+    toast("Choose a target language first", true);
+    return;
+  }
+  const go = $("translate-go");
+  go.disabled = true;
+  toast(`Translating job #${jobId}\u2026`);
   try {
     const payload = await api(`/api/jobs/${jobId}/translate`, {
       method: "POST",
@@ -212,8 +292,11 @@ async function promptTranslate(jobId) {
     });
     toast(`Wrote ${payload.files.join(", ")}`);
     await showDetail(jobId);
+    await refreshJobs();
   } catch (error) {
     toast(error.message, true);
+  } finally {
+    go.disabled = false;
   }
 }
 
@@ -223,7 +306,18 @@ async function refreshJobs() {
     const payload = await api("/api/jobs?limit=200");
     state.jobs = payload.jobs;
     renderJobs();
-    if (state.detailId) await showDetail(state.detailId);
+    if (state.detailId) {
+      // A job can be removed from the dashboard or the CLI while it is open
+      // here; without this check the panel would keep asking for a 404 and
+      // reporting an error every second.
+      const stillThere = state.jobs.some((job) => job.id === state.detailId);
+      if (stillThere) await showDetail(state.detailId);
+      else {
+        const gone = state.detailId;
+        closeDetail();
+        toast(`Job #${gone} is no longer in the queue`);
+      }
+    }
   } catch (error) {
     toast(error.message, true);
   }
@@ -246,10 +340,49 @@ async function refreshHeader() {
   }
 }
 
+function fillLanguageSelects(spoken, translation) {
+  // Spoken languages come from the recogniser, translation targets from the
+  // translator: different sets, so the page lists each one truthfully.
+  const speak = $("speak");
+  speak.textContent = "";
+  const detect = document.createElement("option");
+  detect.value = "";
+  detect.textContent = "detect automatically";
+  speak.appendChild(detect);
+  for (const [code, name] of Object.entries(spoken).sort((a, b) => a[1].localeCompare(b[1]))) {
+    const option = document.createElement("option");
+    option.value = code;
+    option.textContent = `${name} (${code})`;
+    speak.appendChild(option);
+  }
+
+  const targets = Object.entries(translation)
+    .sort((a, b) => a[1].localeCompare(b[1]));
+  for (const id of ["translate", "detail-translate"]) {
+    const select = $(id);
+    select.textContent = "";
+    if (id === "translate") {
+      const off = document.createElement("option");
+      off.value = "";
+      off.textContent = "(no translation)";
+      select.appendChild(off);
+    }
+    for (const [code, name] of targets) {
+      const option = document.createElement("option");
+      option.value = code;
+      option.textContent = `${name} (${code})`;
+      select.appendChild(option);
+    }
+  }
+  state.choices = { spoken, translation };
+  renderJobs();  // the first paint may have run before the names arrived
+}
+
 async function fillSelects() {
   try {
     const payload = await api("/api/models");
     const model = $("model");
+    model.textContent = "";
     for (const label of payload.batch) {
       const option = document.createElement("option");
       option.value = label;
@@ -257,13 +390,7 @@ async function fillSelects() {
       model.appendChild(option);
     }
     const languages = await api("/api/languages");
-    const select = $("translate");
-    for (const [code, name] of Object.entries(languages.languages)) {
-      const option = document.createElement("option");
-      option.value = code;
-      option.textContent = `${name} (${code})`;
-      select.appendChild(option);
-    }
+    fillLanguageSelects(languages.spoken || {}, languages.translation || languages.languages || {});
   } catch (error) {
     toast(error.message, true);
   }
@@ -274,6 +401,8 @@ $("queue-form").addEventListener("submit", async (event) => {
   const body = {
     path: $("path").value.trim(),
     model: $("model").value || undefined,
+    // Empty means "detect it" and "do not translate" respectively.
+    language: $("speak").value || undefined,
     translate_to: $("translate").value || undefined,
     diarize: $("diarize").checked,
     align: $("align").checked,
@@ -289,6 +418,16 @@ $("queue-form").addEventListener("submit", async (event) => {
 });
 
 $("detail-close").addEventListener("click", closeDetail);
+$("translate-go").addEventListener("click", () => {
+  if (state.detailId) translateJob(state.detailId);
+});
+$("text-smaller").addEventListener("click", () => nudgeScale(-1));
+$("text-larger").addEventListener("click", () => nudgeScale(1));
+$("text-normal").addEventListener("click", () => {
+  state.scale = 1;
+  applyScale();
+});
+applyScale();
 
 $("token-save").addEventListener("click", () => {
   state.token = $("token").value.trim();

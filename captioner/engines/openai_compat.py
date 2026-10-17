@@ -168,6 +168,8 @@ class OpenAIWhisperEngine(_OpenAIBackend):
         on_progress=None,
         on_stage=None,
         should_cancel=None,
+        language: str | None = None,
+        on_language=None,
     ) -> list[Word]:
         """Timed words for one file, uploaded to the API.
 
@@ -191,16 +193,19 @@ class OpenAIWhisperEngine(_OpenAIBackend):
         if on_stage is not None:
             on_stage("uploading", None)
         model = model_size or self.model
-        content_type, body = _multipart(
-            {
-                "model": model,
-                "response_format": "verbose_json",
-                "timestamp_granularities[]": "word",
-                "language": "en",
-            },
-            {"file": (path.name, path.read_bytes())},
-        )
+        fields = {
+            "model": model,
+            "response_format": "verbose_json",
+            "timestamp_granularities[]": "word",
+        }
+        if language:
+            # The API accepts an ISO-639-1 hint; omitting it lets the server
+            # detect, which is what an unset job language means here.
+            fields["language"] = language
+        content_type, body = _multipart(fields, {"file": (path.name, path.read_bytes())})
         data = self._post("/audio/transcriptions", body=body, content_type=content_type)
+        if on_language is not None and isinstance(data, dict) and data.get("language"):
+            on_language(str(data["language"]), None)
         words = words_from_response(data)
         if on_stage is not None:
             on_stage("transcribing", 1.0)
@@ -278,9 +283,10 @@ class OpenAIChatTranslator(_OpenAIBackend):
     DEFAULT_MODEL = "gpt-4o-mini"
     ENV_MODEL = "CAPTIONER_MT_MODEL"
     SYSTEM_PROMPT = (
-        "You translate subtitle lines. Translate every numbered line into {language}. "
-        "Keep the same line numbers, keep the same order, one translated line per input "
-        "line. Output the numbered lines only, with no notes or explanations."
+        "You translate subtitle lines. Translate every numbered line from {source} "
+        "into {language}. Keep the same line numbers, keep the same order, one "
+        "translated line per input line. Output the numbered lines only, with no "
+        "notes or explanations."
     )
 
     def __init__(self, model: str = None, **kwargs):
@@ -296,25 +302,32 @@ class OpenAIChatTranslator(_OpenAIBackend):
             return ok, why
         return True, f"{self.model} at {self.base_url}"
 
-    def translate_many(self, texts: Sequence[str], target: str) -> list[str]:
-        """Translate ``texts`` into ``target``, preserving order and length."""
+    def translate_many(self, texts: Sequence[str], target: str,
+                       source: str | None = None) -> list[str]:
+        """Translate ``texts`` into ``target``, preserving order and length.
+
+        ``source`` is the language being read (``None`` = English): a hosted
+        model usually works it out for itself, but naming it is free and stops
+        a short line in a rare script from being read as the wrong language.
+        """
         lines = [str(text) for text in texts]
         if not lines:
             return []
-        parsed = self._translate_batch(lines, target)
+        parsed = self._translate_batch(lines, target, source)
         if parsed is not None:
             return parsed
         logger.warning("%s dropped lines in a batch reply; retrying one at a time",
                        self.name)
-        return [self._translate_one(line, target) for line in lines]
+        return [self._translate_one(line, target, source) for line in lines]
 
-    def _chat(self, user_content: str, target: str) -> str:
+    def _chat(self, user_content: str, target: str, source: str | None = None) -> str:
         payload = {
             "model": self.model,
             "temperature": 0,
             "messages": [
                 {"role": "system", "content": self.SYSTEM_PROMPT.format(
-                    language=_language_label(target))},
+                    language=_language_label(target),
+                    source=_language_label(source or "en"))},
                 {"role": "user", "content": user_content},
             ],
         }
@@ -325,13 +338,13 @@ class OpenAIChatTranslator(_OpenAIBackend):
             raise EngineError(f"{self.name}: unexpected response shape: {data}") from exc
         return str(content or "")
 
-    def _translate_batch(self, lines: list[str], target: str) -> list[str] | None:
+    def _translate_batch(self, lines: list[str], target: str,
+                         source: str | None = None) -> list[str] | None:
         numbered = "\n".join(f"{i}. {line}" for i, line in enumerate(lines, start=1))
-        parsed = _parse_numbered(self._chat(numbered, target), len(lines))
-        return parsed
+        return _parse_numbered(self._chat(numbered, target, source), len(lines))
 
-    def _translate_one(self, line: str, target: str) -> str:
-        content = self._chat(f"1. {line}", target)
+    def _translate_one(self, line: str, target: str, source: str | None = None) -> str:
+        content = self._chat(f"1. {line}", target, source)
         parsed = _parse_numbered(content, 1)
         if parsed is not None:
             return parsed[0]
@@ -361,14 +374,11 @@ def _parse_numbered(content: str, count: int) -> list[str] | None:
     return [found[index] for index in range(1, count + 1)]
 
 
-def _language_label(target: str) -> str:
-    """Display name for a target code, without importing the heavy module."""
-    try:
-        from ..translate import language_name
+def _language_label(code: str) -> str:
+    """Display name for a language code, without importing the heavy module."""
+    from ..languages import translation_name
 
-        return language_name(target) or target
-    except Exception:  # noqa: BLE001 - a label is not worth failing over
-        return target
+    return translation_name(code) or code
 
 
 def _register() -> None:

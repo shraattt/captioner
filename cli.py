@@ -1,14 +1,14 @@
 """Command-line interface for the captioner.
 
 Lets you drive the whole pipeline without a GUI:
-  python cli.py add <file>        queue a file
+  python cli.py add <file>        queue a file (-l hi for a Hindi recording)
   python cli.py status            show jobs
   python cli.py run-once          process one queued job
   python cli.py work              poll the queue forever (the worker process)
   python cli.py cancel <job_id>   stop a queued or running job
   python cli.py retry <job_id>    requeue a failed job
   python cli.py translate <job>   add subtitles in another language
-  python cli.py languages         list translation targets
+  python cli.py languages         list what can be heard and translated
   python cli.py watch             queue new files from the watched folders
   python cli.py api               serve the HTTP API and browser UI
 """
@@ -18,6 +18,28 @@ import time
 from pathlib import Path
 
 from captioner import config, db, worker
+from captioner.languages import spoken_language, spoken_name
+
+
+def _validated(readings: list[tuple[str, str]]) -> str | None:
+    """Validate one or more (flag, value) language arguments.
+
+    Returns an error message when any of them is not a code the app knows - at
+    queue time, not four minutes into a transcription.
+    """
+    for flag, value in readings:
+        if not value:
+            continue
+        try:
+            if flag == "--language":
+                spoken_language(value)
+            else:
+                from captioner.translate import language_code
+
+                language_code(value)
+        except ValueError as exc:
+            return f"{flag}: {exc}"
+    return None
 
 
 def cmd_add(args, conn) -> int:
@@ -25,25 +47,25 @@ def cmd_add(args, conn) -> int:
     if not path.exists():
         print(f"error: file not found: {path}")
         return 1
-    if args.translate_to:
-        from captioner.translate import language_code
-
-        try:
-            language_code(args.translate_to)
-        except ValueError as exc:
-            print(f"error: {exc}")
-            return 2
+    problem = _validated([("--language", args.language),
+                          ("--translate-to", args.translate_to)])
+    if problem:
+        print(f"error: {problem}")
+        return 2
     existing = worker.find_duplicate(conn, path)
     if existing is not None:
         print(f"already has a job: #{existing['id']} ({existing['status']}) - "
               "delete it first to transcribe this audio again")
         return 0
+    language = spoken_language(args.language)
     job_id = worker.enqueue(
         conn, str(path),
         diarize=args.diarize, align=args.align, translate_to=args.translate_to,
+        source_lang=language,
     )
     extras = [name for name, on in
               (("speakers", args.diarize), ("alignment", args.align),
+               (f"spoken:{spoken_name(language)}", bool(language)),
                (f"translate:{args.translate_to}", bool(args.translate_to))) if on]
     suffix = f" [{', '.join(extras)}]" if extras else ""
     print(f"queued job #{job_id}: {path.name}{suffix}")
@@ -112,25 +134,36 @@ def cmd_retry(args, conn) -> int:
 
 def cmd_translate(args, conn) -> int:
     """Translate a finished job's captions without re-transcribing."""
-    from captioner.translate import Translator, translate_subtitles
+    from captioner.translate import Translator, language_code, translate_subtitles
 
+    # Check the target first: a typo should not surface as a confusing error
+    # about the source language, or as a missing file.
+    try:
+        language_code(args.to)
+    except ValueError as exc:
+        print(f"error: {exc}")
+        return 2
     row = conn.execute(
-        "SELECT id, file_name, status, diarize FROM jobs WHERE id = ?", (args.job_id,)
+        "SELECT id, file_name, status, diarize, source_lang, detected_lang "
+        "FROM jobs WHERE id = ?", (args.job_id,)
     ).fetchone()
     if row is None:
         print(f"error: no job #{args.job_id}")
         return 1
     out_dir = Path(config.OUTPUT_DIR) / f"job_{row['id']}"
     translator = Translator(model_name=args.model) if args.model else None
+    # Read the transcript as the language it was spoken in, not as English.
+    source = args.source or row["source_lang"] or row["detected_lang"] or None
     try:
         paths = translate_subtitles(
             out_dir, args.to, translator=translator,
-            speaker_names=bool(row["diarize"]),
+            speaker_names=bool(row["diarize"]), source=source,
         )
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}")
         return 1
-    print(f"translated job #{row['id']} ({row['file_name']}) -> "
+    origin = f" from {spoken_name(source)}" if source else ""
+    print(f"translated job #{row['id']} ({row['file_name']}){origin} -> "
           + ", ".join(p.name for p in paths))
 
     # Remember the language on the row so the dashboard can show it too.
@@ -140,11 +173,21 @@ def cmd_translate(args, conn) -> int:
 
 
 def cmd_languages(args, conn) -> int:
-    from captioner.translate import LANGUAGES
+    """List what the recogniser can hear and what the translator can write."""
+    from captioner.languages import SPOKEN_LANGUAGES, TRANSLATION_LANGUAGES
 
-    print("translation targets:")
-    for code, name in sorted(LANGUAGES.items(), key=lambda kv: kv[1]):
+    print(f"spoken languages (transcribe -l <code>) - {len(SPOKEN_LANGUAGES)}:")
+    for code, name in sorted(SPOKEN_LANGUAGES.items(), key=lambda kv: kv[1]):
         print(f"  {code:<4} {name}")
+    print(f"\ntranslation targets (translate --to <code>) - "
+          f"{len(TRANSLATION_LANGUAGES)}:")
+    for code, name in sorted(TRANSLATION_LANGUAGES.items(), key=lambda kv: kv[1]):
+        print(f"  {code:<4} {name}")
+    only_spoken = sorted(set(SPOKEN_LANGUAGES) - set(TRANSLATION_LANGUAGES))
+    if only_spoken:
+        print("\ntranscribable but not translatable (the translator has no "
+              "model for them):")
+        print("  " + ", ".join(f"{code} ({spoken_name(code)})" for code in only_spoken))
     return 0
 
 
@@ -156,6 +199,12 @@ def cmd_watch(args, conn) -> int:
     """
     from captioner import automation
 
+    # Fail before the loop, not once per discovered file.
+    problem = _validated([("--language", args.language),
+                          ("--translate-to", args.translate_to)])
+    if problem:
+        print(f"error: {problem}")
+        return 2
     folders = automation.watch_dirs(args.dir)
     if not folders:
         print("no watched folders exist; create one or pass --dir")
@@ -170,6 +219,7 @@ def cmd_watch(args, conn) -> int:
                 job_id = worker.enqueue(
                     conn, str(path), diarize=args.diarize, align=args.align,
                     translate_to=args.translate_to,
+                    source_lang=spoken_language(args.language),
                 )
                 print(f"queued job #{job_id}: {path.name}")
             time.sleep(args.interval)
@@ -198,6 +248,9 @@ def main(argv=None) -> int:
                    help="re-time words with wav2vec2 forced alignment")
     p.add_argument("--translate-to", metavar="LANG", default=None,
                    help="also write captions.<lang>.srt/.vtt (see: languages)")
+    p.add_argument("--language", "-l", metavar="CODE", default=None,
+                   help="spoken language, e.g. hi or de (default: detect it; "
+                        "see: languages)")
     p.set_defaults(func=cmd_add)
 
     p = sub.add_parser("status", help="list all jobs")
@@ -220,12 +273,15 @@ def main(argv=None) -> int:
     p = sub.add_parser("translate", help="translate a finished job's captions")
     p.add_argument("job_id", type=int)
     p.add_argument("--to", required=True, help="target language code, e.g. hi")
+    p.add_argument("--source", metavar="CODE", default=None,
+                   help="language the transcript is in (default: the job's "
+                        "own answer, then English)")
     p.add_argument("--model", default=None,
                    help="override the MT model (default facebook/m2m100_418M; "
                         "try facebook/m2m100_1.2B for better quality, ~4.8 GB)")
     p.set_defaults(func=cmd_translate)
 
-    p = sub.add_parser("languages", help="list translation targets")
+    p = sub.add_parser("languages", help="list spoken languages and translation targets")
     p.set_defaults(func=cmd_languages)
 
     p = sub.add_parser("watch", help="queue new files from the watched folders")
@@ -238,6 +294,8 @@ def main(argv=None) -> int:
     p.add_argument("--align", action="store_true", help="re-time words with forced alignment")
     p.add_argument("--translate-to", metavar="LANG", default=None,
                    help="also write captions.<lang>.srt/.vtt")
+    p.add_argument("--language", "-l", metavar="CODE", default=None,
+                   help="spoken language of the watched files (default: detect)")
     p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("api", help="serve the HTTP API + browser UI")

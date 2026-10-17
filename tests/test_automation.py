@@ -231,7 +231,7 @@ def test_worker_fires_the_webhook_when_a_job_settles(conn, monkeypatch, tmp_path
 
     monkeypatch.setattr(
         worker, "transcribe_words",
-        lambda path, size=None, on_progress=None, on_stage=None, should_cancel=None: [
+        lambda path, size=None, on_progress=None, on_stage=None, should_cancel=None, **_:  [
             Word(text="hello", start=0.0, end=1.0)
         ],
     )
@@ -255,7 +255,7 @@ def test_worker_still_settles_when_the_webhook_explodes(conn, monkeypatch, tmp_p
 
     monkeypatch.setattr(
         worker, "transcribe_words",
-        lambda path, size=None, on_progress=None, on_stage=None, should_cancel=None: [
+        lambda path, size=None, on_progress=None, on_stage=None, should_cancel=None, **_:  [
             Word(text="hello", start=0.0, end=1.0)
         ],
     )

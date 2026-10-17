@@ -27,11 +27,24 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
+from . import features
+from .languages import (
+    TRANSLATION_LANGUAGES,
+    translation_language,
+    translation_name,
+)
 from .segmenter import Block, Word
 
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "facebook/m2m100_418M"
+# The language M2M100 reads when nothing else is known. Pass ``source=`` to
+# translate from anything else: the recogniser reports the spoken language, so
+# a Hindi transcript translated into French is now tagged ``hi`` rather than
+# run through the English default. On the short clean lines we measured, the
+# output happened to be identical either way - M2M100's encoder is genuinely
+# multilingual - but the tag is what the model is designed around, and it is
+# what keeps a cache shared between two readings of the same text honest.
 SOURCE_LANG = "en"
 MAX_CHARS = 400  # model limit is 512 tokens; leave headroom for expansion
 
@@ -47,59 +60,41 @@ NO_REPEAT_NGRAM = 3
 MODEL_ENV = "CAPTIONER_TRANSLATE_MODEL"
 
 # Target-language codes accepted by M2M100's tokenizer, with display names.
-# (M2M100's language set is 100 codes; this is the shortlist the UI offers -
-# notably it has no Telugu, so "te" is absent rather than silently broken.)
-LANGUAGES: dict[str, str] = {
-    "hi": "Hindi",
-    "es": "Spanish",
-    "fr": "French",
-    "de": "German",
-    "pt": "Portuguese",
-    "ru": "Russian",
-    "ar": "Arabic",
-    "zh": "Chinese (simplified)",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "tr": "Turkish",
-    "id": "Indonesian",
-    "vi": "Vietnamese",
-    "th": "Thai",
-    "fa": "Persian",
-    "he": "Hebrew",
-    "sw": "Swahili",
-    "ta": "Tamil",
-    "bn": "Bengali",
-    "mr": "Marathi",
-    "gu": "Gujarati",
-    "kn": "Kannada",
-    "ml": "Malayalam",
-    "pa": "Punjabi",
-    "ur": "Urdu",
-    "ne": "Nepali",
-    "si": "Sinhala",
-}
+# The full set (100 codes) comes from the model card - see captioner.languages.
+# It is *not* the same 100 as the recogniser's: M2M100 has no Telugu, so a
+# Telugu recording can be transcribed but not translated, and the UI says so.
+LANGUAGES: dict[str, str] = TRANSLATION_LANGUAGES
 
 SPEAKER_PREFIX = re.compile(r"^(\[[^\]]+\]:\s*)")
 
 
 def language_name(code: str) -> str:
     """Display name for a language key (falls back to the key itself)."""
-    return LANGUAGES.get(code, code)
+    return translation_name(code)
 
 
 def language_code(code: str) -> str:
     """Validate a target language key, returning M2M100's code for it."""
-    if code not in LANGUAGES:
+    resolved = translation_language(code)
+    if resolved is None:
         raise ValueError(
-            f"unknown target language {code!r}; choose from {', '.join(sorted(LANGUAGES))}"
+            f"unknown target language {code!r}; choose from "
+            f"{', '.join(sorted(LANGUAGES))}"
         )
-    return code
+    return resolved
 
 
 def default_cache_path() -> Path:
+    """Where translated lines are cached: beside the other job data.
+
+    Deliberately `config.DATA_DIR` and not a path beside the code: from a
+    checkout the two are the same folder, but a packaged build keeps its data
+    in the user's profile and treats its own program folder as read-only, so a
+    cache written next to the code would fail to save on every translated line.
+    """
     from . import config
 
-    return Path(config.PROJECT_ROOT) / "data" / "cache" / "translations.json"
+    return config.DATA_DIR / "cache" / "translations.json"
 
 
 def _chunks(text: str, limit: int = MAX_CHARS) -> list[str]:
@@ -155,14 +150,18 @@ class Translator:
         return self._cache
 
     @staticmethod
-    def cache_key(target: str, text: str, model: str | None = None) -> str:
+    def cache_key(target: str, text: str, model: str | None = None,
+                  source: str | None = None) -> str:
         """Cache identity for one line.
 
-        The default model keeps the original key shape so caches written before
-        model overrides existed stay valid; a different model is namespaced
-        into the key, because its output is not interchangeable.
+        The default model and source language keep the original key shape so
+        caches written before either could be overridden stay valid; anything
+        else is namespaced into the key, because its output is not
+        interchangeable.
         """
         tag = target if model in (None, MODEL_NAME) else f"{model}|{target}"
+        if source and source != SOURCE_LANG:
+            tag = f"{source}>{tag}"
         return hashlib.sha1(f"{tag}\x1f{text}".encode()).hexdigest()
 
     def save_cache(self) -> None:
@@ -183,8 +182,11 @@ class Translator:
     def _ensure_model(self) -> None:
         if self._model is not None or self._translate_fn is not None:
             return
-        import torch
-        from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+        try:
+            import torch
+            from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
+        except ImportError as exc:  # a packaged slim build has no torch at all
+            raise RuntimeError(features.refusal("translate_local")) from exc
 
         if self.device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -211,14 +213,17 @@ class Translator:
         except Exception:
             return False
 
-    def _run(self, texts: Sequence[str], target: str) -> list[str]:
+    def _run(self, texts: Sequence[str], target: str, source: str | None = None) -> list[str]:
         if self._translate_fn is not None:
             return list(self._translate_fn(texts, target))
         import torch
 
         self._ensure_model()
         code = language_code(target)
-        self._tokenizer.src_lang = SOURCE_LANG
+        # Tell the tokenizer what it is reading. M2M100 is not a detector: it
+        # has no way to notice that the English tag is wrong, so the caller's
+        # answer has to be right.
+        self._tokenizer.src_lang = _source_language(source)
         bos = self._tokenizer.get_lang_id(code)
         out: list[str] = []
         for start in range(0, len(texts), self.batch_size):
@@ -241,16 +246,21 @@ class Translator:
         return out
 
     #public API
-    def translate_many(self, texts: Sequence[str], target: str) -> list[str]:
+    def translate_many(self, texts: Sequence[str], target: str,
+                       source: str | None = None) -> list[str]:
         """Translate ``texts`` to ``target``, using the cache for repeats.
 
         The returned list matches the input order and length; only strings that
         were not already cached are sent to the model, in one batched pass.
+        ``source`` is the language being read (default English); translating a
+        Hindi transcript into French needs it, and the worker passes whatever
+        the recogniser heard.
         """
         texts = list(texts)
         language_code(target)  # validates the language before doing any work
+        source = _source_language(source)
         cache = self._load_cache()
-        keys = [self.cache_key(target, text, self.model_name) for text in texts]
+        keys = [self.cache_key(target, text, self.model_name, source) for text in texts]
 
         missing = [i for i, key in enumerate(keys) if key not in cache]
         if missing:
@@ -261,7 +271,7 @@ class Translator:
                 pieces = _chunks(texts[index])
                 flat.extend(pieces)
                 owner.extend([index] * len(pieces))
-            translated = self._run(flat, target)
+            translated = self._run(flat, target, source)
             if len(translated) != len(flat):  # pragma: no cover - defensive
                 raise RuntimeError(
                     f"translator returned {len(translated)} results for {len(flat)} inputs"
@@ -275,14 +285,43 @@ class Translator:
 
         return [cache[key] for key in keys]
 
-    def translate_block(self, block: Block, target: str) -> Block:
+    def translate_block(self, block: Block, target: str,
+                        source: str | None = None) -> Block:
         """One caption block, timing and speaker label preserved."""
-        translated = self.translate_many([block.text], target)[0]
+        translated = self.translate_many([block.text], target, source)[0]
         speaker = block.words[0].speaker if block.words else None
         return replace(
             block,
             words=[Word(text=translated, start=block.start, end=block.end, speaker=speaker)],
         )
+
+
+def _source_language(source: str | None) -> str:
+    """The code to tag the input with, validated against M2M100's set.
+
+    Nothing else in the app should have to know that the translator reads a
+    different (smaller, differently spelled) language set than the recogniser;
+    a Whisper code that M2M100 lacks is reported, not silently defaulted to
+    English and quietly mistranslated.
+    """
+    if source is None or not str(source).strip():
+        return SOURCE_LANG
+    try:
+        return translation_language(source) or SOURCE_LANG
+    except ValueError:
+        wanted = str(source).strip().lower()
+        from .languages import SPOKEN_LANGUAGES
+
+        hint = ""
+        if wanted in SPOKEN_LANGUAGES:
+            hint = (
+                f" - {SPOKEN_LANGUAGES[wanted]} can be transcribed, but the "
+                "translator has no model for it"
+            )
+        raise ValueError(
+            f"the translator cannot read {source!r}{hint}; set the recording's "
+            "language to one it knows, or leave it unset"
+        ) from None
 
 
 def default_translator():
@@ -301,15 +340,32 @@ def translate_blocks(
     blocks: Sequence[Block],
     target: str,
     translator=None,
+    source: str | None = None,
 ) -> list[Block]:
-    """Translate every block in one batch, keeping speaker labels verbatim."""
+    """Translate every block in one batch, keeping speaker labels verbatim.
+
+    ``source`` is the spoken language of the transcript (``None`` = English).
+    """
     translator = translator or default_translator()
+    # Validate once here, so every backend gets a code M2M100's family knows or
+    # an error naming the problem - never a silent English default.
+    source_code = _source_language(source)
     prefixes = [SPEAKER_PREFIX.match(block.text) for block in blocks]
     bare = [
         block.text if match is None else block.text[match.end():]
         for block, match in zip(blocks, prefixes, strict=True)
     ]
-    translated = translator.translate_many(bare, target)
+    try:
+        translated = translator.translate_many(bare, target, source_code)
+    except TypeError:
+        # A backend written before the source language existed. It still works,
+        # but it will assume English, so say so rather than let a wrong reading
+        # pass for a right one.
+        logger.warning(
+            "%s does not take a source language; its input is assumed to be %s",
+            type(translator).__name__, SOURCE_LANG,
+        )
+        translated = translator.translate_many(bare, target)
 
     out: list[Block] = []
     for block, match, text in zip(blocks, prefixes, translated, strict=True):
@@ -331,22 +387,25 @@ def translate_subtitles(
     target: str,
     translator=None,
     speaker_names: bool = False,
+    source: str | None = None,
 ) -> list[Path]:
     """Write ``captions.<lang>.srt`` / ``.vtt`` next to the original captions.
 
     Reads the existing ``captions.srt``, so translation is a pure
     post-processing step over the artifact the batch already produced: it never
     needs the queue, the source media, or a re-transcribe.
+
+    ``source`` is the transcript's spoken language; omit it for English.
     """
     from . import srt
 
     out_dir = Path(out_dir)
-    source = out_dir / "captions.srt"
-    if not source.exists():
-        raise FileNotFoundError(f"{source} not found — transcribe the job first")
+    caption_file = out_dir / "captions.srt"
+    if not caption_file.exists():
+        raise FileNotFoundError(f"{caption_file} not found — transcribe the job first")
 
-    blocks = srt.parse_srt(source.read_text(encoding="utf-8"))
-    translated = translate_blocks(blocks, target, translator=translator)
+    blocks = srt.parse_srt(caption_file.read_text(encoding="utf-8"))
+    translated = translate_blocks(blocks, target, translator=translator, source=source)
 
     srt_path = out_dir / f"captions.{target}.srt"
     vtt_path = out_dir / f"captions.{target}.vtt"

@@ -18,6 +18,8 @@ Routes (all JSON unless noted):
     GET    /api/languages             translation targets
     GET    /api/jobs                  the queue, newest first
     POST   /api/jobs                  queue a file (200 if already queued)
+                                      fields: path, model, language, diarize,
+                                              align, translate_to
     GET    /api/jobs/{id}             one job, with its caption blocks
     GET    /api/jobs/{id}/captions    captions as json, srt, vtt or text
     POST   /api/jobs/{id}/cancel      stop a queued or running job
@@ -49,6 +51,7 @@ from pathlib import Path
 
 from . import __version__, automation, config, db, models, worker
 from .engines import describe_all, probe
+from .languages import SPOKEN_LANGUAGES, spoken_language, spoken_name
 from .translate import LANGUAGES, language_code
 
 logger = logging.getLogger(__name__)
@@ -183,6 +186,13 @@ def _job_dict(row, conn=None) -> dict:
             "align": bool(row["align"]),
             "translate_to": row["translate_to"],
         },
+        # Empty source language means "detect it"; detected_language is what
+        # the recogniser actually heard (empty until a worker has run).
+        "source_lang": row["source_lang"] or "",
+        "detected_lang": row["detected_lang"] or "",
+        "source_lang_name": spoken_name(row["source_lang"] or "") if "source_lang" in keys else "",
+        "detected_lang_name": spoken_name(row["detected_lang"] or "")
+        if "detected_lang" in keys else "",
     }
     out_dir = Path(config.OUTPUT_DIR) / f"job_{row['id']}"
     job["outputs"] = (
@@ -280,7 +290,17 @@ def h_models(request: Request) -> tuple[int, object]:
 
 
 def h_languages(request: Request) -> tuple[int, object]:
-    return 200, {"languages": LANGUAGES}
+    """Every language the app knows, for both directions.
+
+    ``languages``/``translation`` are what captions can be translated into;
+    ``spoken`` is what the recogniser can be told to listen for (a different
+    set - see :mod:`captioner.languages`).
+    """
+    return 200, {
+        "languages": LANGUAGES,
+        "translation": LANGUAGES,
+        "spoken": SPOKEN_LANGUAGES,
+    }
 
 
 def h_jobs_list(request: Request) -> tuple[int, object]:
@@ -326,12 +346,17 @@ def h_jobs_create(request: Request) -> tuple[int, object]:
             language_code(translate_to)
         except ValueError as exc:
             raise ApiError(400, str(exc)) from None
+    try:
+        language = spoken_language(request.body_str("language"))
+    except ValueError as exc:
+        raise ApiError(400, str(exc)) from None
     model = request.body_str("model")
     job_id = worker.enqueue(
         request.conn, str(path), model_size=model,
         diarize=request.body_flag("diarize"),
         align=request.body_flag("align"),
         translate_to=translate_to,
+        source_lang=language,
     )
     row = _fetch_job(request.conn, job_id)
     return 202, {"job": _job_dict(row, request.conn), "duplicate": False}
@@ -410,8 +435,13 @@ def h_job_translate(request: Request) -> tuple[int, object]:
     except ValueError as exc:
         raise ApiError(400, str(exc)) from None
     out_dir = Path(config.OUTPUT_DIR) / f"job_{job_id}"
+    # Read the transcript as the language it was actually spoken in; the
+    # recogniser's answer is the best of the two, and English is the fallback.
+    source = row["source_lang"] or row["detected_lang"] or None
     try:
-        paths = translate_subtitles(out_dir, target, speaker_names=bool(row["diarize"]))
+        paths = translate_subtitles(
+            out_dir, target, speaker_names=bool(row["diarize"]), source=source
+        )
     except FileNotFoundError as exc:
         raise ApiError(404, str(exc)) from None
     except Exception as exc:  # noqa: BLE001 - reported as a 502 to the caller

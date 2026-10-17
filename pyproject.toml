@@ -4,7 +4,7 @@ version = "0.7.0"
 description = "Local-first AI captioning for Windows: batch SRT/VTT subtitles plus a live caption overlay, running fully offline on your own GPU."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "All rights reserved" }
+license = { text = "MIT" }
 keywords = ["whisper", "subtitles", "srt", "live-captions", "pyside6", "faster-whisper"]
 classifiers = [
     "Environment :: Win32 (MS Windows)",

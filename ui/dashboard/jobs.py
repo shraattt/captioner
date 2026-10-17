@@ -46,6 +46,7 @@ class JobQueueMixin:
             "diarize": self.diarize_check.isChecked(),
             "align": self.align_check.isChecked(),
             "translate_to": self.translate_combo.currentData() or None,
+            "source_lang": self.language_combo.currentData() or None,
         }
 
     def add_paths(self, paths) -> int:
@@ -416,14 +417,23 @@ class JobQueueMixin:
         return len(new_files)
 
     def _maybe_notify(self, rows) -> None:
-        """Beep/flash once when the queue drains (pending -> settled)."""
+        """Beep/flash once when the queue drains (pending -> settled).
+
+        Two switches, both the user's: the Options checkbox for this session,
+        and quiet mode in the preferences, which suppresses the interruption
+        for good. The status bar message is shown either way - quiet means
+        quiet, not uninformed.
+        """
         pending = sum(1 for r in rows if r["status"] in ("queued", "running"))
-        if self.notify_check.isChecked() and rows and pending == 0 and self._pending_before > 0:
+        drained = bool(rows) and pending == 0 and self._pending_before > 0
+        if self.notify_check.isChecked() and drained:
             self.last_notification = datetime.now().strftime("%H:%M:%S")
-            QApplication.beep()
-            QApplication.alert(self, 5000)
             self.statusBar().showMessage(
                 f"batch finished at {self.last_notification} — nothing left to process",
                 8000,
             )
+            # Quiet mode keeps the note and drops the interruption.
+            if not getattr(self.prefs, "quiet", False):
+                QApplication.beep()
+                QApplication.alert(self, 5000)
         self._pending_before = pending

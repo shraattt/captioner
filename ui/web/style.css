@@ -1,4 +1,14 @@
-/* Same palette family as the desktop app: near-black, one violet accent. */
+/* Same palette family as the desktop app: near-black, one violet accent.
+   Colours here are held to the same contrast rule as the desktop themes -
+   tests/test_api.py checks the served stylesheet for it.
+   Three things here are accessibility, not decoration:
+     - the light block follows the operating system's light mode, because a
+       dark page on a bright screen is the complaint that brought people here;
+     - every control keeps a visible focus ring, since the keyboard path is a
+       first-class way to use this page;
+     - text size is a variable (--scale) the toolbar buttons change, and
+       reduced-motion turns transitions off entirely. */
+
 :root {
   --bg: #0b0b10;
   --panel: #15151d;
@@ -6,12 +16,48 @@
   --border: rgba(255, 255, 255, 0.08);
   --text: #eceaf5;
   --text-dim: #a3a1b8;
-  --accent: #8b5cf6;
+  /* The button tint, not the brand accent: #8b5cf6 with dark text measured a
+     marginal 4.6:1, where this is 6.8:1 (same numbers as the desktop theme). */
+  --accent: #a78bfa;
+  --accent-text: #16121f;
   --accent-soft: rgba(139, 92, 246, 0.16);
   --ok: #34d399;
   --warn: #fbbf24;
   --err: #f87171;
   --radius: 12px;
+  --scale: 1;
+  --focus: 2px solid #a78bfa;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f4f8;
+    --panel: #ffffff;
+    --panel-soft: #f0f0f5;
+    --border: rgba(18, 18, 30, 0.14);
+    --text: #1b1b23;
+    --text-dim: #4d4d5a;
+    --accent: #6d28d9;
+    --accent-text: #ffffff;
+    --accent-soft: rgba(109, 40, 217, 0.12);
+    --ok: #157f4d;
+    --warn: #8a5a00;
+    --err: #b3243a;
+    --focus: 2px solid #5b21b6;
+  }
+  body { background: var(--bg); }
+}
+
+/* Windows' "increase contrast" setting: opaque panels, harder borders. */
+@media (prefers-contrast: more) {
+  :root {
+    --border: currentColor;
+    --accent: #c4b5fd;
+    --accent-text: #000000;
+    --text-dim: var(--text);
+    --focus: 3px solid #ffe066;
+  }
+  .panel, .chip, #toast { box-shadow: none; }
 }
 
 * { box-sizing: border-box; }
@@ -21,21 +67,55 @@ body {
   padding: 22px;
   background: radial-gradient(1200px 600px at 20% -10%, #1c1730, var(--bg));
   color: var(--text);
-  font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+  font: calc(14px * var(--scale))/1.5 "Segoe UI", system-ui, sans-serif;
+}
+
+/* The first Tab lands here, so a keyboard user can skip the header and form. */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--panel-soft);
+  color: var(--text);
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  z-index: 10;
+}
+.skip-link:focus { left: 12px; top: 12px; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 header {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
 
-h1 { font-size: 20px; margin: 0; letter-spacing: 0.2px; }
-h2 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
+h1 { font-size: calc(20px * var(--scale)); margin: 0; letter-spacing: 0.2px; }
+h2 { font-size: calc(15px * var(--scale)); margin: 0 0 12px; font-weight: 600; }
 .grow { flex: 1; }
-.muted, .hint { color: var(--text-dim); font-size: 12.5px; }
+.muted, .hint { color: var(--text-dim); font-size: calc(12.5px * var(--scale)); }
 .hint { margin: 10px 0 0; }
+.hint code { color: var(--text); }
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
 
 .chip {
   padding: 3px 10px;
@@ -43,7 +123,7 @@ h2 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
   border-radius: 999px;
   background: var(--panel-soft);
   color: var(--text-dim);
-  font-size: 12px;
+  font-size: calc(12px * var(--scale));
   white-space: nowrap;
 }
 
@@ -54,13 +134,24 @@ h2 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
   padding: 16px;
   margin-bottom: 16px;
 }
+.panel:focus { outline: var(--focus); outline-offset: 2px; }
 
 .row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-top: 12px; }
-label { color: var(--text-dim); font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
+label { color: var(--text-dim); font-size: calc(12.5px * var(--scale));
+        display: flex; align-items: center; gap: 6px; }
 label.check { gap: 6px; }
+.path-label { margin-bottom: 6px; }
+
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin: 14px 0 0;
+  padding: 6px 12px 12px;
+}
+legend { color: var(--text-dim); font-size: calc(12px * var(--scale)); padding: 0 6px; }
 
 input[type="text"], input[type="password"], select {
-  background: #0f0f16;
+  background: var(--panel-soft);
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -69,16 +160,18 @@ input[type="text"], input[type="password"], select {
   min-width: 220px;
 }
 
-input[type="text"]:focus, input[type="password"]:focus, select:focus {
-  outline: none;
-  border-color: rgba(167, 139, 250, 0.55);
+input[type="text"]:focus-visible, input[type="password"]:focus-visible,
+select:focus-visible, button:focus-visible, summary:focus-visible,
+a:focus-visible, pre:focus-visible, [tabindex]:focus-visible {
+  outline: var(--focus);
+  outline-offset: 2px;
 }
 
 #path { width: 100%; min-width: 0; }
 
 button {
   background: var(--accent);
-  color: #0e0a18;
+  color: var(--accent-text);
   border: 0;
   border-radius: 8px;
   padding: 9px 14px;
@@ -94,19 +187,20 @@ button.ghost {
   border: 1px solid var(--border);
   font-weight: 500;
   padding: 5px 10px;
-  font-size: 12px;
+  font-size: calc(12px * var(--scale));
 }
+button.ghost:hover { color: var(--text); border-color: var(--accent); }
 
 button:disabled { opacity: 0.45; cursor: default; }
 
 .scroll { max-height: 460px; overflow: auto; }
 
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+table { width: 100%; border-collapse: collapse; font-size: calc(13px * var(--scale)); }
 th {
   text-align: left;
   color: var(--text-dim);
   font-weight: 500;
-  font-size: 12px;
+  font-size: calc(12px * var(--scale));
   padding: 6px 10px;
   position: sticky;
   top: 0;
@@ -119,7 +213,7 @@ tbody tr:hover { background: var(--accent-soft); }
   display: inline-block;
   padding: 2px 9px;
   border-radius: 999px;
-  font-size: 11.5px;
+  font-size: calc(11.5px * var(--scale));
   background: var(--panel-soft);
   color: var(--text-dim);
 }
@@ -129,21 +223,34 @@ tbody tr:hover { background: var(--accent-soft); }
 .status.queued { background: rgba(251, 191, 36, 0.14); color: var(--warn); }
 .status.canceled { background: rgba(156, 163, 175, 0.16); color: #d1d5db; }
 
-.bar { width: 90px; height: 6px; border-radius: 4px; background: #24242f; overflow: hidden; }
+@media (prefers-color-scheme: light) {
+  .status.running { background: rgba(37, 99, 235, 0.12); color: #1d4ed8; }
+  .status.done { background: rgba(21, 127, 77, 0.12); color: var(--ok); }
+  .status.error { background: rgba(179, 36, 58, 0.12); color: var(--err); }
+  .status.queued { background: rgba(138, 90, 0, 0.12); color: var(--warn); }
+  .status.canceled { background: rgba(75, 85, 99, 0.12); color: #374151; }
+}
+
+.bar { width: 90px; height: 6px; border-radius: 4px; background: var(--panel-soft);
+       overflow: hidden; border: 1px solid var(--border); }
 .bar > i { display: block; height: 100%; background: var(--accent); }
 
 .file { color: var(--text); }
-.small { color: var(--text-dim); font-size: 12px; }
+.small { color: var(--text-dim); font-size: calc(12px * var(--scale)); }
 .actions { display: flex; gap: 6px; }
 
+details { margin-top: 12px; }
+summary { color: var(--text-dim); cursor: pointer; font-size: calc(12.5px * var(--scale)); }
+summary:hover { color: var(--text); }
+
 pre {
-  background: #0f0f16;
+  background: var(--panel-soft);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
   max-height: 380px;
   overflow: auto;
-  font: 12.5px/1.55 Consolas, "Cascadia Mono", monospace;
+  font: calc(12.5px * var(--scale))/1.55 Consolas, "Cascadia Mono", monospace;
   white-space: pre-wrap;
 }
 
@@ -160,3 +267,12 @@ pre {
   box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
 }
 #toast.error { border-left-color: var(--err); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

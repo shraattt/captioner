@@ -17,11 +17,17 @@ ASR backend
     describe()                    one line for the UI
     available() -> (bool, str)    usable right now? if not, why not
     transcribe_words(path, *, model_size=None, on_progress=None,
-                     on_stage=None, should_cancel=None) -> list[Word]
+                     on_stage=None, should_cancel=None, language=None,
+                     on_language=None) -> list[Word]
+        language:      spoken language code, or None to detect it
+        on_language:   called with (code, probability) once it is known
 
 MT backend
     name / describe() / available()
-    translate_many(texts, target) -> list[str]
+    translate_many(texts, target, source=None) -> list[str]
+        source: the language being read, or None for English. A backend that
+                only takes two arguments still works (the caller logs that it
+                is assuming English rather than ignoring the request).
 
 Shipped backends:
     asr  faster-whisper   local CTranslate2 models, the default

@@ -31,6 +31,7 @@ from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 
+from . import features
 from .segmenter import Word
 
 logger = logging.getLogger(__name__)
@@ -150,8 +151,11 @@ class WordAligner:
     def _ensure_model(self) -> None:
         if self._model is not None or self._logits_fn is not None:
             return
-        import torch
-        from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+        try:
+            import torch
+            from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+        except ImportError as exc:  # a packaged slim build has no torch at all
+            raise RuntimeError(features.refusal("align")) from exc
 
         if self.device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"

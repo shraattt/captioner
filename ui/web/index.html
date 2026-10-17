@@ -8,62 +8,130 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<a class="skip-link" href="#queue-panel">Skip to the job queue</a>
+
 <header>
   <h1>Captioner</h1>
   <span class="muted" id="version"></span>
   <span class="grow"></span>
   <span class="chip" id="engine-asr" title="speech recognition backend"></span>
   <span class="chip" id="engine-mt" title="translation backend"></span>
-  <span class="chip" id="queue" title="jobs by status"></span>
+  <span class="chip" id="queue" role="status" aria-live="polite"
+        title="jobs by status"></span>
 </header>
 
-<section class="panel">
-  <h2>Queue a file</h2>
-  <form id="queue-form">
-    <input id="path" type="text" placeholder="C:\Videos\clip.mp4  (full path on the machine running the worker)" required>
-    <div class="row">
-      <label>Model <select id="model"></select></label>
-      <label>Translate to <select id="translate"><option value="">(no translation)</option></select></label>
-      <label class="check"><input type="checkbox" id="diarize"> speaker labels</label>
-      <label class="check"><input type="checkbox" id="align"> word alignment</label>
-      <button type="submit">Add to queue</button>
+<!-- Text size is a control, not a browser-zoom secret: it scales the whole
+     page and is remembered, because reading dense timestamps at 14px is not
+     something everyone can do. -->
+<div class="toolbar" role="group" aria-label="Display">
+  <span class="muted" id="text-size-label">Text size</span>
+  <span class="visually-hidden" aria-live="polite" id="text-size-value"></span>
+  <button type="button" class="ghost" id="text-smaller" aria-label="Smaller text">A&minus;</button>
+  <button type="button" class="ghost" id="text-normal" aria-label="Normal text size">A</button>
+  <button type="button" class="ghost" id="text-larger" aria-label="Larger text">A&plus;</button>
+</div>
+
+<main>
+  <section class="panel" aria-labelledby="queue-form-title">
+    <h2 id="queue-form-title">Queue a file</h2>
+    <form id="queue-form">
+      <label class="path-label" for="path">Media file (full path on the machine running the worker)</label>
+      <input id="path" type="text" placeholder="C:\Videos\clip.mp4" required
+             aria-describedby="path-help">
+      <p class="hint" id="path-help">
+        Tip: dropping the file into the uploads folder also works when the folder is watched.
+      </p>
+
+      <fieldset>
+        <legend>Options for this file (remembered for the next one)</legend>
+        <div class="row">
+          <label for="model">Model</label>
+          <select id="model" aria-describedby="model-help"></select>
+          <span class="hint" id="model-help">bigger is slower and more accurate</span>
+
+          <label for="speak">Spoken language</label>
+          <select id="speak"></select>
+
+          <label for="translate">Translate to</label>
+          <select id="translate"></select>
+
+          <label class="check" for="diarize">
+            <input type="checkbox" id="diarize"> speaker labels
+          </label>
+          <label class="check" for="align">
+            <input type="checkbox" id="align"> word alignment
+          </label>
+
+          <button type="submit">Add to queue</button>
+        </div>
+      </fieldset>
+    </form>
+    <p class="hint" id="watch-note"></p>
+  </section>
+
+  <section class="panel" id="queue-panel" aria-labelledby="jobs-title" tabindex="-1">
+    <h2 id="jobs-title">Jobs</h2>
+    <div class="scroll">
+      <table id="jobs">
+        <caption class="visually-hidden">
+          Queued, running and finished jobs, newest first. Each row has buttons to
+          view, cancel or retry and remove that job.
+        </caption>
+        <thead>
+          <tr>
+            <th scope="col">#</th>
+            <th scope="col">File</th>
+            <th scope="col">Status</th>
+            <th scope="col">Model</th>
+            <th scope="col">Language</th>
+            <th scope="col">Progress</th>
+            <th scope="col">Created</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
-  </form>
-  <p class="hint" id="watch-note"></p>
-</section>
+  </section>
 
-<section class="panel">
-  <h2>Jobs</h2>
-  <div class="scroll">
-    <table id="jobs">
-      <thead>
-        <tr><th>#</th><th>File</th><th>Status</th><th>Model</th><th>Progress</th><th>Created</th><th>Actions</th></tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </div>
-</section>
+  <section class="panel" id="detail-panel" hidden aria-labelledby="detail-title">
+    <h2>
+      <span id="detail-title">Job</span>
+      <button class="ghost" id="detail-close">close</button>
+    </h2>
+    <div class="row" id="detail-actions"></div>
+    <details id="manual-translate">
+      <summary>Translate this job&rsquo;s captions</summary>
+      <div class="row">
+        <label for="detail-translate">Target language</label>
+        <select id="detail-translate"></select>
+        <button type="button" id="translate-go">Write translated captions</button>
+        <span class="hint" id="translate-help">
+          The transcript is read as the language the recogniser heard, so a Hindi
+          recording can go straight into French. Nothing is transcribed twice.
+        </span>
+      </div>
+    </details>
+    <pre id="detail-body" tabindex="0" aria-label="Job details and captions"></pre>
+  </section>
 
-<section class="panel" id="detail-panel" hidden>
-  <h2><span id="detail-title">Job</span> <button class="ghost" id="detail-close">close</button></h2>
-  <div class="row" id="detail-actions"></div>
-  <pre id="detail-body"></pre>
-</section>
+  <section class="panel" aria-labelledby="access-title">
+    <h2 id="access-title">Access</h2>
+    <p class="hint" id="token-help">
+      This page talks to the API on the machine that runs the captioner. If the server was
+      started with a token (<code>CAPTIONER_API_TOKEN</code>), paste it here; it is kept in
+      this browser only.
+    </p>
+    <div class="row">
+      <label class="visually-hidden" for="token">Bearer token</label>
+      <input id="token" type="password" placeholder="bearer token (optional)"
+             aria-describedby="token-help">
+      <button id="token-save" type="button">Use token</button>
+    </div>
+  </section>
+</main>
 
-<section class="panel">
-  <h2>Access</h2>
-  <p class="hint">
-    This page talks to the API on the machine that runs the captioner. If the server was
-    started with a token (<code>CAPTIONER_API_TOKEN</code>), paste it here; it is kept in
-    this browser only.
-  </p>
-  <div class="row">
-    <input id="token" type="password" placeholder="bearer token (optional)">
-    <button id="token-save" type="button">Use token</button>
-  </div>
-</section>
-
-<div id="toast" hidden></div>
+<div id="toast" role="status" aria-live="polite" hidden></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -19,16 +19,21 @@ class _Segment:
 
 class _Info:
     duration = 10.0
+    language = None
+    language_probability = None
 
 
 class _FakeModel:
-    def __init__(self, segments):
+    def __init__(self, segments, language=None, probability=None):
         self._segments = segments
         self.kwargs = None
+        self._info = _Info()
+        self._info.language = language
+        self._info.language_probability = probability
 
     def transcribe(self, path, **kwargs):
         self.kwargs = kwargs
-        return iter(self._segments), _Info()
+        return iter(self._segments), self._info
 
 
 def _patch_model(monkeypatch, model):
@@ -54,7 +59,43 @@ def test_word_extraction_and_progress(monkeypatch):
     assert fractions == [0.4, 1.0]  # segment end / media duration
     assert model.kwargs["word_timestamps"] is True
     assert model.kwargs["vad_filter"] is True
-    assert model.kwargs["language"] == "en"
+    # Nothing was said about the language, so the model detects it. Forcing
+    # "en" here is what used to make a Hindi lecture come back in English.
+    assert model.kwargs["language"] is None
+
+
+def test_a_named_language_is_passed_through(monkeypatch):
+    """Telling the transcriber what is spoken skips detection."""
+    model = _FakeModel([_Segment(1.0, [_Word("హాయ్", 0.0, 0.5)])])
+    _patch_model(monkeypatch, model)
+
+    transcribe.transcribe_words("x.wav", "tiny", language="te")
+
+    assert model.kwargs["language"] == "te"
+
+
+def test_detected_language_is_reported(monkeypatch):
+    """The language the model heard is handed back, once, with its confidence."""
+    model = _FakeModel([_Segment(1.0, [_Word("Hallo", 0.0, 0.5)])],
+                       language="de", probability=0.91)
+    _patch_model(monkeypatch, model)
+    heard = []
+
+    transcribe.transcribe_words("x.wav", "tiny", on_language=lambda c, p: heard.append((c, p)))
+
+    assert heard == [("de", 0.91)]
+
+
+def test_a_named_language_is_not_reported_as_detected(monkeypatch):
+    """An explicit language is echoed too, so the job row can show it."""
+    model = _FakeModel([_Segment(1.0, [_Word("Bonjour", 0.0, 0.5)])], language="fr")
+    _patch_model(monkeypatch, model)
+    heard = []
+
+    transcribe.transcribe_words("x.wav", "tiny", language="fr",
+                                on_language=lambda c, p: heard.append(c))
+
+    assert heard == ["fr"]
 
 
 def test_progress_is_optional(monkeypatch):

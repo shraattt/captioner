@@ -10,6 +10,7 @@ a unit test should trigger.
 """
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -116,6 +117,77 @@ def test_ui_assets_are_served_with_their_types(server):
     assert status == 200 and "javascript" in content_type
     status, content_type, _body = call(base, "/static/style.css")
     assert status == 200 and content_type.startswith("text/css")
+
+
+def _luminance(color: str) -> float:
+    """Relative luminance of ``#rrggbb`` (WCAG 2.1, sRGB)."""
+    value = color.lstrip("#")
+    channels = []
+    for index in (0, 2, 4):
+        raw = int(value[index:index + 2], 16) / 255
+        channels.append(raw / 12.92 if raw <= 0.04045 else ((raw + 0.055) / 1.055) ** 2.4)
+    r, g, b = channels
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _resolve(variables: dict, name: str, depth: int = 4) -> str:
+    """Follow ``var(--other)`` aliases until a literal colour comes out."""
+    value = variables[name].strip()
+    for _ in range(depth):
+        alias = re.fullmatch(r"var\((--[\w-]+)\)", value)
+        if alias is None or alias.group(1) not in variables:
+            return value
+        value = variables[alias.group(1)].strip()
+    return value
+
+
+def _contrast(foreground: str, background: str) -> float:
+    light, dark = sorted((_luminance(foreground), _luminance(background)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def _css_variables(css: str) -> list[dict]:
+    """Every ``:root { --x: y }`` block in a stylesheet, in file order."""
+    blocks = []
+    for match in re.finditer(r":root\s*\{([^}]*)\}", css):
+        variables = dict(re.findall(r"(--[\w-]+):\s*([^;]+);", match.group(1)))
+        if variables:
+            blocks.append({key: value.strip() for key, value in variables.items()})
+    return blocks
+
+
+def test_the_web_page_keeps_its_text_legible_in_every_colour_scheme(server):
+    """The dark, light and high-contrast palettes all clear 4.5:1.
+
+    This is the browser twin of the desktop check in tests/test_preferences.py:
+    the three ``:root`` blocks in the served stylesheet are the dark default,
+    the ``prefers-color-scheme: light`` replacement and the
+    ``prefers-contrast: more`` one.
+    """
+    _httpd, base = server
+    _status, _type, css = call(base, "/static/style.css")
+    dark, light, contrast = _css_variables(css)[:3]
+    # The light and contrast blocks only override what changes, so each is
+    # checked as the dark base with its own overrides applied - which is what a
+    # browser does with them.
+    variants = {
+        "dark": dark,
+        "light": {**dark, **light},
+        "high contrast": {**dark, **contrast},
+    }
+
+    failures = []
+    for name, variables in variants.items():
+        pairs = {
+            "body text": ("--text", "--bg"),
+            "dim text": ("--text-dim", "--panel"),
+            "button label": ("--accent-text", "--accent"),
+        }
+        for what, (front, back) in pairs.items():
+            ratio = _contrast(_resolve(variables, front), _resolve(variables, back))
+            if ratio < 4.5:
+                failures.append(f"{name}: {what} is {ratio:.2f}:1")
+    assert not failures, failures
 
 
 def test_the_page_links_a_favicon_and_it_is_the_app_icon(server):

@@ -12,6 +12,7 @@ import time
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from captioner import config, db, worker
@@ -260,11 +261,66 @@ def test_queue_options_come_from_the_options_popover(make_win, conn, tmp_path):
     assert "translate:hi" in win.statusBar().currentMessage()
 
 
+def test_options_this_build_cannot_run_are_greyed_out_and_explained(make_win, monkeypatch):
+    """A slim build must not offer a switch it would fail to honour.
+
+    The label keeps the feature's own name (so it can still be found and read
+    out), adds *not in this build*, the control is switched off and disabled so
+    no job can ask for it by accident, and the tooltip says what to install.
+    """
+    from captioner import features
+
+    monkeypatch.setattr(features, "present", lambda module: module == "numpy")
+    win = make_win()
+
+    assert win.diarize_check.isEnabled() is False
+    assert win.diarize_check.isChecked() is False
+    assert "Identify speakers" in win.diarize_check.text()
+    assert "not in this build" in win.diarize_check.text()
+    assert "pyannote" in win.diarize_check.toolTip()
+
+    assert win.align_check.isEnabled() is False
+    assert "not in this build" in win.align_check.text()
+
+    assert win.translate_combo.isEnabled() is False
+    assert win.translate_combo.currentData() == ""      # Off stays first
+    assert "not in this build" in win.translate_label.text()
+    assert win.translate_combo.count() > 1              # the languages stay listed
+
+    # The queue sees them off, and the memory of an older install is corrected
+    # rather than remembered: an option that cannot run must not be inherited.
+    assert win._queue_options() == {
+        "diarize": False,
+        "align": False,
+        "translate_to": None,
+        "source_lang": None,
+    }
+    assert win.prefs.diarize is False
+    assert win.prefs.align is False
+    assert win.prefs.translate_to == ""
+
+
+def test_a_complete_install_offers_every_option(make_win):
+    """The other half of the rule: a checkout must not grey anything out."""
+    win = make_win()
+    for control in (win.diarize_check, win.align_check, win.translate_combo):
+        assert control.isEnabled() is True
+        assert "not in this build" not in control.toolTip()
+    assert "not in this build" not in win.translate_combo.toolTip()
+
+
 def test_options_default_to_off(make_win):
     win = make_win()
-    assert win._queue_options() == {"diarize": False, "align": False, "translate_to": None}
+    assert win._queue_options() == {
+        "diarize": False,
+        "align": False,
+        "translate_to": None,
+        "source_lang": None,  # detect the spoken language unless told otherwise
+    }
     assert win.translate_combo.itemData(0) == ""  # "Off" is first
     assert win.translate_combo.count() > 1
+    assert win.language_combo.itemData(0) == ""  # "Detect automatically" first
+    assert win.language_combo.count() > 1
 
 
 def test_adding_a_file_already_in_the_queue_is_reported(make_win, conn, tmp_path):
@@ -315,3 +371,63 @@ def test_cancel_with_nothing_running_says_so(make_win, conn, tmp_path):
     win = make_win()
     assert win.cancel_running_job() is False
     assert "no job is running" in win.statusBar().currentMessage()
+
+
+# the opening card
+
+def test_the_opening_card_says_captioner_and_who_made_it(qapp):
+    """The title card the user asked for: CAPTIONER, then project by sharat."""
+    from ui.dashboard.splash import Splash
+
+    card = Splash(minimum_ms=0)
+    try:
+        assert card.title.text() == "CAPTIONER"
+        assert card.subtitle.text() == "project by sharat"
+        # No frame and no taskbar entry: it is a card, not a second window.
+        assert card.windowFlags() & Qt.WindowType.FramelessWindowHint
+        assert card.windowFlags() & Qt.WindowType.SplashScreen
+        card.show()
+        qapp.processEvents()
+        assert card.isVisible()
+    finally:
+        card.close()
+
+
+def test_the_opening_card_hands_over_to_the_window(qapp):
+    """finish() reveals the window once, after the card has faded away."""
+    from ui.dashboard.splash import Splash
+
+    card = Splash(minimum_ms=0)
+    card.show()
+    revealed: list = []
+    card.finish(lambda: revealed.append(True))
+
+    deadline = time.monotonic() + 5
+    while not revealed and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert revealed == [True]  # exactly once, never twice
+    assert not card.isVisible()
+
+
+def test_about_credits_the_project_and_the_build(make_win):
+    """The same credit as the opening card, and what this build carries."""
+    from ui.dashboard.constants import APP_VERSION
+
+    text = make_win().about_text()
+    assert "Captioner" in text
+    assert "project by sharat" in text
+    assert APP_VERSION in text
+    # features.summary() says what this build carries, in prose rather than a
+    # label: either everything, or what is missing and how to get it.
+    assert "available" in text.lower() or "not" in text.lower()
+
+
+def test_the_opening_card_can_be_switched_off():
+    from ui.dashboard import splash
+
+    assert splash.enabled({}) is True
+    for value in ("1", "true", "on", "YES"):
+        assert splash.enabled({"CAPTIONER_NO_SPLASH": value}) is False
+    assert splash.enabled({"CAPTIONER_NO_SPLASH": "0"}) is True

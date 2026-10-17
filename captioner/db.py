@@ -28,6 +28,11 @@ OPTIONAL_JOB_COLUMNS = (
     ("diarize", "INTEGER NOT NULL DEFAULT 0"),
     ("align", "INTEGER NOT NULL DEFAULT 0"),
     ("translate_to", "TEXT"),
+    # Spoken language: NULL/empty means detect it. detected_lang is what the
+    # recogniser actually heard, which is worth showing even when the answer
+    # was "you told me" - it is how a wrong guess becomes visible.
+    ("source_lang", "TEXT"),
+    ("detected_lang", "TEXT"),
     # Set by any client (API, CLI, dashboard) to ask for a stop; the worker
     # running the job polls it, so the request crosses process boundaries.
     ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
@@ -52,7 +57,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     diarize       INTEGER NOT NULL DEFAULT 0,
     align         INTEGER NOT NULL DEFAULT 0,
     translate_to  TEXT,
-    cancel_requested INTEGER NOT NULL DEFAULT 0
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    source_lang   TEXT,
+    detected_lang TEXT
 );
 
 CREATE TABLE IF NOT EXISTS captions (

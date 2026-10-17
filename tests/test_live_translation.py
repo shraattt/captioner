@@ -63,7 +63,12 @@ class FakeCapture:
 
 
 class FakeModel:
-    """Stands in for a loaded WhisperModel, returning one finished sentence."""
+    """Stands in for a loaded WhisperModel, returning one finished sentence.
+
+    The word sits a few seconds back in the 12 s window, where a real session
+    would freeze it: just inside the commit margin and well inside the band
+    the engine accepts first-time words from.
+    """
 
     def __init__(self, text="Hello there."):
         self.text = text
@@ -73,8 +78,8 @@ class FakeModel:
             text=self.text,
             avg_logprob=-0.2,
             no_speech_prob=0.1,
-            end=1.0,
-            words=[types.SimpleNamespace(word=self.text, start=0.0, end=0.5)],
+            end=8.0,
+            words=[types.SimpleNamespace(word=self.text, start=7.0, end=7.5)],
         )
         return [segment], types.SimpleNamespace(duration=1.0)
 

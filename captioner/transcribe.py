@@ -77,7 +77,8 @@ def preload_cuda_dlls() -> None:
     Preloading the libs by absolute path registers them under their base
     names, which is what ctranslate2's later LoadLibrary call resolves
     against. Sources, in order: CAPTIONER_CUDA_BIN, the NVIDIA pip wheels
-    (nvidia-cublas-cu12), a torch install, then the CUDA Toolkit.
+    (nvidia-cublas-cu12), a torch install, the CUDA wheels carried inside a
+    packaged build, then the CUDA Toolkit.
     """
     if sys.platform != "win32":
         return
@@ -90,6 +91,12 @@ def preload_cuda_dlls() -> None:
         dirs.append(Path(override))
     for sp in site.getsitepackages() + [site.getusersitepackages()]:
         dirs += [Path(sp) / "nvidia" / "cublas" / "bin", Path(sp) / "torch" / "lib"]
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        # A packaged build has no site-packages to search: the CUDA wheels it
+        # was built with sit beside the bundle's own code (scripts/package.py).
+        dirs += [Path(bundle) / "nvidia" / "cublas" / "bin",
+                 Path(bundle) / "torch" / "lib"]
     if os.environ.get("CUDA_PATH"):
         dirs.append(Path(os.environ["CUDA_PATH"]) / "bin")
 
@@ -251,6 +258,8 @@ def transcribe_words(
     on_progress: Callable[[float], None] | None = None,
     on_stage: StageCallback | None = None,
     should_cancel: Callable[[], bool] | None = None,
+    language: str | None = None,
+    on_language: "Callable[[str, float | None], None] | None" = None,
 ) -> list[Word]:
     """Transcribe an audio/video file into timed words.
 
@@ -264,6 +273,14 @@ def transcribe_words(
     ``should_cancel`` is polled between segments: raising
     :class:`TranscriptionCancelled` within a few seconds of a long file beats
     making the user wait for the whole thing.
+    ``language`` is the spoken language (an ISO code Whisper knows); ``None``
+    means detect it. Detection is the default because forcing "en" on, say, a
+    Hindi lecture primes an English decoder: the captions come back in English
+    instead of the language that was spoken, with no error to show for it.
+    Naming the language skips the detection step and is more accurate when you
+    know it.
+    ``on_language`` reports ``(code, probability)`` once it is known, so a job
+    can record what it actually heard.
     """
     model_size = model_size or config.BATCH_MODEL_SIZE
     device = resolve_device()
@@ -284,7 +301,8 @@ def transcribe_words(
         word_timestamps=True,
         vad_filter=True,          # trims silence, fewer wasted windows
         vad_parameters={"min_silence_duration_ms": 500},
-        language="en",
+        # None lets Whisper detect the language instead of assuming English.
+        language=language or None,
         # Carrying context between segments makes Whisper repeat itself on
         # repetitive audio (tiny's main failure mode); dropping it measured
         # equal accuracy here and slightly faster, and is the standard
@@ -292,16 +310,38 @@ def transcribe_words(
         condition_on_previous_text=False,
     )
 
+    reported = False
+
+    def report_language() -> None:
+        """Tell the caller what was heard, once, as soon as it is known.
+
+        With detection on, faster-whisper fills this in while decoding, so it
+        is checked both right after the call and after the first segment.
+        """
+        nonlocal reported
+        code = getattr(info, "language", None)
+        if reported or not code:
+            return
+        reported = True
+        if on_language is not None:
+            on_language(code, getattr(info, "language_probability", None))
+
+    report_language()
     words: list[Word] = []
     for seg in segments:  # generator - transcription runs lazily here
         _check_cancel(should_cancel)  # checked per segment: prompt on long files
+        report_language()
         for w in seg.words:
             text = w.word.strip()
             if text:
                 words.append(Word(text=text, start=w.start, end=w.end))
         if on_progress is not None and info.duration:
             on_progress(min(1.0, seg.end / info.duration))
-    logger.info("Transcribed %s (%.1fs audio, %d words)", audio_path, info.duration, len(words))
+    report_language()
+    logger.info(
+        "Transcribed %s (%.1fs audio, %d words, language %s)",
+        audio_path, info.duration, len(words), getattr(info, "language", language or "?"),
+    )
     return words
 
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from . import config
+from . import config, features
 from .segmenter import Block, Word, segment_words
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,11 @@ def _load_pipeline():
     if _pipeline_cache is not None:
         return _pipeline_cache
 
-    from pyannote.audio.core.plda import PLDA
-    from pyannote.audio.pipelines import SpeakerDiarization
+    try:
+        from pyannote.audio.core.plda import PLDA
+        from pyannote.audio.pipelines import SpeakerDiarization
+    except ImportError as exc:  # a packaged slim build has no pyannote/torch
+        raise RuntimeError(features.refusal("speakers")) from exc
 
     placeholder = PLDA.__new__(PLDA)  # never used by AgglomerativeClustering
     pipeline = SpeakerDiarization(

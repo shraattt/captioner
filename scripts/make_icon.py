@@ -67,12 +67,16 @@ def _theme():
 
 
 _THEME = _theme()
-# Fallbacks mirror the theme, so the icon still builds if a name is renamed.
-ACCENT_BRIGHT = QColor(getattr(_THEME, "_ACCENT_BRIGHT", "#a78bfa"))
-ACCENT_DIM = QColor(getattr(_THEME, "_ACCENT_DIM", "#7c4fe0"))
-ACCENT_TEXT = QColor(getattr(_THEME, "_ACCENT_TEXT", "#0e0a18"))
+# The mark is drawn from the *brand* accent, not from the button tint: buttons
+# are tuned so dark text on them is legible, and that is a UI decision that
+# should not repaint the app icon. Fallbacks mirror the theme so the icon still
+# builds if a name is renamed.
+_DARK = _THEME.DARK
+ACCENT_BRIGHT = QColor(_DARK.accent_bright)
+ACCENT_DIM = QColor(_DARK.accent_dim)
+ACCENT_TEXT = QColor(getattr(_DARK, "accent_text", "#0e0a18"))
 TILE_TOP = QColor("#1f1f2b")
-TILE_BOTTOM = QColor(getattr(_THEME, "_BG", "#0b0b10"))
+TILE_BOTTOM = QColor(_DARK.bg)
 TILE_EDGE = QColor("#332d4d")
 
 

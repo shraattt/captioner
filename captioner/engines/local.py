@@ -39,6 +39,8 @@ class LocalWhisperEngine:
         on_progress=None,
         on_stage=None,
         should_cancel=None,
+        language: str | None = None,
+        on_language=None,
     ):
         """Timed words for a media file (see ``transcribe.transcribe_words``)."""
         from .. import transcribe
@@ -49,6 +51,8 @@ class LocalWhisperEngine:
             on_progress=on_progress,
             on_stage=on_stage,
             should_cancel=should_cancel,
+            language=language,
+            on_language=on_language,
         )
 
     def model_is_cached(self, model_size: str) -> bool:
@@ -87,8 +91,15 @@ class LocalM2M100Engine:
         except Exception as exc:  # noqa: BLE001 - report, never raise from a probe
             return False, f"{type(exc).__name__}: {exc}"
 
-    def translate_many(self, texts: Sequence[str], target: str) -> list[str]:
-        return self._translator_or_default().translate_many(list(texts), target)
+    def translate_many(self, texts: Sequence[str], target: str,
+                       source: str | None = None) -> list[str]:
+        """Translate into ``target``, reading ``source`` (``None`` = English).
+
+        The source language has to reach the underlying model: M2M100 is not a
+        language detector, so dropping this argument would silently translate
+        every transcript as if it were English.
+        """
+        return self._translator_or_default().translate_many(list(texts), target, source)
 
     def languages(self) -> dict[str, str]:
         """Target codes this backend offers, with display names."""

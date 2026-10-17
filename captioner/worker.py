@@ -33,6 +33,8 @@ def transcribe_words(
     on_progress=None,
     on_stage=None,
     should_cancel=None,
+    language: str | None = None,
+    on_language=None,
 ):
     """Transcribe through the configured ASR backend.
 
@@ -46,6 +48,8 @@ def transcribe_words(
         on_progress=on_progress,
         on_stage=on_stage,
         should_cancel=should_cancel,
+        language=language,
+        on_language=on_language,
     )
 
 # A running job whose heartbeat is older than this has no live owner: the
@@ -183,18 +187,21 @@ def enqueue(
     diarize: bool = False,
     align: bool = False,
     translate_to: str | None = None,
+    source_lang: str | None = None,
 ) -> int:
     """Add a file to the queue; returns the job id.
 
-    ``align`` / ``translate_to`` / ``diarize`` are stored on the row rather
-    than passed to the worker, so a job keeps the options it was queued with
-    even if the UI checkboxes change (or another worker picks it up). The row
-    also carries a content digest, which is what ``find_duplicate`` matches on.
+    ``align`` / ``translate_to`` / ``diarize`` / ``source_lang`` are stored on
+    the row rather than passed to the worker, so a job keeps the options it was
+    queued with even if the UI controls change (or another worker picks it up).
+    The row also carries a content digest, which is what ``find_duplicate``
+    matches on.
     """
     p = Path(file_path)
     cur = conn.execute(
         "INSERT INTO jobs (file_path, file_name, file_hash, model_size, "
-        "created_at, diarize, align, translate_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "created_at, diarize, align, translate_to, source_lang) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             str(p.resolve()),
             p.name,
@@ -204,6 +211,7 @@ def enqueue(
             1 if diarize else 0,
             1 if align else 0,
             translate_to or None,
+            source_lang or None,
         ),
     )
     conn.commit()
@@ -240,16 +248,40 @@ def claim_next(conn) -> dict:
         row = conn.execute(
             "SELECT * FROM jobs WHERE status = 'queued' ORDER BY id LIMIT 1"
         ).fetchone()
-        if row is None:
-            return {}
-        now = _now()
-        conn.execute(
-            "UPDATE jobs SET status = 'running', started_at = ?, heartbeat_at = ?, "
-            "error = NULL, progress = NULL, stage = NULL "
-            "WHERE id = ? AND status = 'queued'",
-            (now, now, row["id"]),
-        )
-    return dict(row)
+        return _claim(conn, row)
+
+
+def claim_job(conn, job_id: int) -> dict:
+    """Claim one *named* queued job, or return {}.
+
+    ``claim_next`` is the worker's rule: oldest first. A caller that named a
+    file - the packaged app's ``--job`` (``captioner.headless``) - must not run
+    somebody else's queued work instead, so it claims by id. The guarded
+    transaction is the same, which is what keeps a dashboard or a second
+    worker from running the same job at the same time.
+    """
+    with conn:
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE id = ? AND status = 'queued'", (job_id,)
+        ).fetchone()
+        return _claim(conn, row)
+
+
+def _claim(conn, row) -> dict:
+    """Mark a queued row running inside the caller's transaction."""
+    if row is None:
+        return {}
+    now = _now()
+    conn.execute(
+        "UPDATE jobs SET status = 'running', started_at = ?, heartbeat_at = ?, "
+        "error = NULL, progress = NULL, stage = NULL "
+        "WHERE id = ? AND status = 'queued'",
+        (now, now, row["id"]),
+    )
+    claimed = dict(row)
+    claimed.update(status="running", started_at=now, heartbeat_at=now,
+                   error=None, progress=None, stage=None)
+    return claimed
 
 
 def run_pipeline(conn, job: dict, cancel: threading.Event | None = None) -> None:
@@ -280,6 +312,21 @@ def run_pipeline(conn, job: dict, cancel: threading.Event | None = None) -> None
             return True
         return cancel_requested(conn, job_id)
 
+    def on_language(code: str, probability: float | None) -> None:
+        """Record what was actually heard, for the UI, the log and translation.
+
+        The row is updated *and* the in-flight job dict, because the dict was
+        read when the job was claimed: without this second line the translation
+        step a few statements later would still be looking at an empty
+        detected_lang and read the transcript as English.
+        """
+        job["detected_lang"] = code
+        _set_detected_language(conn, job_id, code)
+        logger.info(
+            "Job %d: language %s%s", job_id, code,
+            f" ({probability:.0%} confidence)" if probability else "",
+        )
+
     try:
         words = transcribe_words(
             job["file_path"],
@@ -287,6 +334,8 @@ def run_pipeline(conn, job: dict, cancel: threading.Event | None = None) -> None
             on_progress=on_progress,
             on_stage=on_stage,
             should_cancel=should_cancel,
+            language=(job.get("source_lang") or None),
+            on_language=on_language,
         )
 
         # Phase 2: optional wav2vec2 alignment. Runs on Whisper's words before
@@ -324,7 +373,10 @@ def run_pipeline(conn, job: dict, cancel: threading.Event | None = None) -> None
         translate_to = job.get("translate_to")
         warning = None
         if translate_to:
-            warning = _translate_output(out_dir, translate_to, diarize_flag, on_stage)
+            warning = _translate_output(
+                out_dir, translate_to, diarize_flag, on_stage,
+                source=_translation_source(job),
+            )
 
         _settle(conn, job_id, "done", warning)
         logger.info("Job %d done: %d caption blocks%s", job_id, len(blocks),
@@ -351,8 +403,18 @@ def notify_webhook(conn, job_id: int) -> bool:
         return False
 
 
+def _translation_source(job: dict) -> str | None:
+    """Which language the translator should read the transcript as.
+
+    What the user told us wins; otherwise what the recogniser heard; otherwise
+    ``None``, and the translator falls back to English. This is the difference
+    between a system that knows what it is reading and one that assumes.
+    """
+    return job.get("source_lang") or job.get("detected_lang") or None
+
+
 def _translate_output(out_dir: Path, target: str, diarized: bool,
-                      on_stage) -> str | None:
+                      on_stage, source: str | None = None) -> str | None:
     """Write ``captions.<lang>.srt/.vtt`` for a finished job (best effort).
 
     Returns a warning string when translation failed: the transcript itself is
@@ -363,7 +425,7 @@ def _translate_output(out_dir: Path, target: str, diarized: bool,
 
     try:
         on_stage("translating", None)
-        translate_subtitles(out_dir, target, speaker_names=diarized)
+        translate_subtitles(out_dir, target, speaker_names=diarized, source=source)
         return None
     except Exception as exc:  # noqa: BLE001 - the transcript is already valid
         logger.warning("translation to %s failed: %s: %s", target, type(exc).__name__, exc)
@@ -502,6 +564,17 @@ def _store_captions(conn, job_id: int, blocks: list[Block], diarize: bool = Fals
         ],
     )
     conn.commit()
+
+
+def _set_detected_language(conn, job_id: int, code: str) -> None:
+    """Store the language the recogniser heard (NULL-safe, best effort)."""
+    try:
+        conn.execute(
+            "UPDATE jobs SET detected_lang = ? WHERE id = ?", (code, job_id)
+        )
+        conn.commit()
+    except sqlite3.Error as exc:  # pragma: no cover - bookkeeping only
+        logger.debug("language write failed for job %s: %s", job_id, exc)
 
 
 def _set_progress(conn, job_id: int, fraction: float) -> None:

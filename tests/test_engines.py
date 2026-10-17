@@ -67,7 +67,8 @@ class FakeEngine:
         return True, "always"
 
     def transcribe_words(self, audio_path, model_size=None, on_progress=None,
-                         on_stage=None, should_cancel=None):
+                         on_stage=None, should_cancel=None, language=None,
+                         on_language=None, **_):
         self.calls.append((audio_path, model_size))
         return [Word(text="fake", start=0.0, end=0.5)]
 
@@ -154,7 +155,8 @@ def test_local_asr_engine_delegates_to_transcribe(monkeypatch):
 
     seen = {}
 
-    def fake(path, model_size=None, on_progress=None, on_stage=None, should_cancel=None):
+    def fake(path, model_size=None, on_progress=None, on_stage=None,
+             should_cancel=None, language=None, on_language=None, **_):
         seen.update(path=path, model_size=model_size, on_stage=on_stage)
         return [Word(text="hi", start=0.0, end=1.0)]
 
@@ -165,16 +167,23 @@ def test_local_asr_engine_delegates_to_transcribe(monkeypatch):
 
 
 def test_local_mt_engine_uses_the_injected_translator():
+    seen = []
+
     class FakeTranslator:
         def available(self):
             return True
 
-        def translate_many(self, texts, target):
+        def translate_many(self, texts, target, source=None):
+            seen.append((list(texts), target, source))
             return [f"{target}:{t}" for t in texts]
 
     engine = LocalM2M100Engine(translator=FakeTranslator())
     assert engine.translate_many(["one", "two"], "hi") == ["hi:one", "hi:two"]
     assert engine.available() == (True, "ready")
+    # The source language must reach the model: dropping it here is what made
+    # every transcript get read as English whatever it really was.
+    assert engine.translate_many(["నమస్తే"], "fr", "te") == ["fr:నమస్తే"]
+    assert seen == [(["one", "two"], "hi", None), (["నమస్తే"], "fr", "te")]
 
 
 #the API ASR backend
